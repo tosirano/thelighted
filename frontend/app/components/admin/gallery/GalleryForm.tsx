@@ -8,14 +8,21 @@ import { Button } from "../../ui/Button";
 import { Input } from "../../ui/Input";
 import { ImageUpload } from "../../ui/ImageUpload";
 import { cn } from "@/lib/utils";
-import type { GalleryCategory } from "@/lib/api/admin";
+
+export const galleryCategories = [
+  "food",
+  "ambiance",
+  "kitchen",
+  "events",
+  "drinks",
+] as const;
 
 const galleryImageSchema = z.object({
   imageUrl: z.string().min(1, "Image is required"),
-  alt: z.string().min(1, "Alt text is required"),
-  category: z.enum(["food", "ambiance", "kitchen", "events", "drinks"]),
+  alt: z.string().min(5, "Alt text must be at least 5 characters"),
+  category: z.enum(galleryCategories),
   isVisible: z.boolean().optional(),
-  displayOrder: z.number().min(0).optional(),
+  displayOrder: z.number().min(0, "Display order must be 0 or greater").optional(),
 });
 
 export type GalleryFormData = z.infer<typeof galleryImageSchema>;
@@ -27,13 +34,14 @@ interface GalleryFormProps {
   submitLabel?: string;
 }
 
-const categories: { value: GalleryCategory; label: string }[] = [
-  { value: "food", label: "Food" },
-  { value: "ambiance", label: "Ambiance" },
-  { value: "kitchen", label: "Kitchen" },
-  { value: "events", label: "Events" },
-  { value: "drinks", label: "Drinks" },
-];
+const categoryDescriptions: Record<(typeof galleryCategories)[number], string> =
+  {
+    food: "Dishes, plating, and food presentation",
+    ambiance: "Restaurant atmosphere, décor, and seating",
+    kitchen: "Behind-the-scenes kitchen and cooking",
+    events: "Special events, celebrations, and gatherings",
+    drinks: "Beverages, cocktails, and drinks menu",
+  };
 
 export function GalleryForm({
   initialData,
@@ -52,40 +60,42 @@ export function GalleryForm({
       isVisible: true,
       displayOrder: 0,
       imageUrl: "",
-      alt: "",
       category: "food",
       ...initialData,
     },
   });
 
-  return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-8">
-      {/* Image Upload */}
-      <div className="bg-white rounded-xl border border-gray-200 p-6">
-        <h3 className="text-lg font-semibold text-gray-900 mb-4">Gallery Image</h3>
+  const handleFormSubmit = async (data: GalleryFormData) => {
+    await onSubmit(data);
+  };
 
-        <div className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Image *
-            </label>
-            <Controller
-              name="imageUrl"
-              control={control}
-              render={({ field }) => (
-                <ImageUpload
-                  value={field.value}
-                  onChange={field.onChange}
-                  error={errors.imageUrl?.message}
-                  disabled={isSubmitting}
-                />
-              )}
-            />
-            <p className="mt-2 text-xs text-gray-500">
-              Upload a high-quality image. Recommended: 1920x1080px (16:9 ratio)
-              for gallery display.
-            </p>
-          </div>
+  return (
+    <form onSubmit={handleSubmit(handleFormSubmit)} className="space-y-8">
+      {/* Gallery Image */}
+      <div className="bg-white rounded-xl border border-gray-200 p-6">
+        <h3 className="text-lg font-semibold text-gray-900 mb-4">
+          Gallery Image
+        </h3>
+
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">
+            Image *
+          </label>
+          <Controller
+            name="imageUrl"
+            control={control}
+            render={({ field }) => (
+              <ImageUpload
+                value={field.value}
+                onChange={field.onChange}
+                error={errors.imageUrl?.message}
+                disabled={isSubmitting}
+              />
+            )}
+          />
+          <p className="mt-1 text-xs text-gray-500">
+            Recommended dimensions: 800×600px. JPG or PNG format.
+          </p>
         </div>
       </div>
 
@@ -95,20 +105,21 @@ export function GalleryForm({
           Image Details
         </h3>
 
-        <div className="space-y-6">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Alt Text */}
-          <div>
+          <div className="md:col-span-2">
             <label className="block text-sm font-medium text-gray-700 mb-2">
               Alt Text *
             </label>
             <Input
               {...register("alt")}
-              placeholder="Describe the image for accessibility..."
+              placeholder="e.g., Freshly plated jollof rice with fried plantain"
               error={errors.alt?.message}
               disabled={isSubmitting}
             />
             <p className="mt-1 text-xs text-gray-500">
-              This description helps with SEO and accessibility for visually impaired users.
+              Describes the image for SEO and accessibility. Be specific and
+              descriptive.
             </p>
           </div>
 
@@ -121,25 +132,29 @@ export function GalleryForm({
               {...register("category")}
               disabled={isSubmitting}
               className={cn(
-                "w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent",
-                errors.category?.message
-                  ? "border-red-300"
-                  : "border-gray-300"
+                "w-full px-4 py-2 border rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent capitalize",
+                errors.category ? "border-red-500" : "border-gray-300",
+                isSubmitting && "opacity-50 cursor-not-allowed",
               )}
             >
-              {categories.map((category) => (
-                <option key={category.value} value={category.value}>
-                  {category.label}
+              {galleryCategories.map((cat) => (
+                <option key={cat} value={cat} className="capitalize">
+                  {cat.charAt(0).toUpperCase() + cat.slice(1)}
                 </option>
               ))}
             </select>
-            {errors.category?.message && (
+            {errors.category && (
               <p className="mt-1 text-sm text-red-600">
                 {errors.category.message}
               </p>
             )}
             <p className="mt-1 text-xs text-gray-500">
-              Select the category that best describes this image.
+              {galleryCategories.map((cat) => (
+                <span key={cat} className="block">
+                  <strong className="capitalize">{cat}</strong>:{" "}
+                  {categoryDescriptions[cat]}
+                </span>
+              ))}
             </p>
           </div>
 
@@ -153,15 +168,18 @@ export function GalleryForm({
               min="0"
               {...register("displayOrder", { valueAsNumber: true })}
               placeholder="0"
+              error={errors.displayOrder?.message}
               disabled={isSubmitting}
+              className={cn(isSubmitting && "opacity-50 cursor-not-allowed")}
             />
             <p className="mt-1 text-xs text-gray-500">
-              Lower numbers appear first. Use this to manually order your gallery images.
+              Controls the order images appear. Use increments of 10 (e.g., 10,
+              20, 30) to allow future insertions.
             </p>
           </div>
 
-          {/* Visibility Toggle */}
-          <div>
+          {/* Visibility */}
+          <div className="md:col-span-2">
             <label className="flex items-center gap-3 cursor-pointer">
               <input
                 type="checkbox"
@@ -174,7 +192,8 @@ export function GalleryForm({
                   Visible on Website
                 </span>
                 <p className="text-xs text-gray-500">
-                  Uncheck to hide this image from the gallery section
+                  When checked, this image will appear in the public gallery.
+                  Uncheck to hide it without deleting.
                 </p>
               </div>
             </label>
@@ -182,8 +201,8 @@ export function GalleryForm({
         </div>
       </div>
 
-      {/* Submit Button */}
-      <div className="flex justify-end gap-4">
+      {/* Submit */}
+      <div className="flex justify-end">
         <Button
           type="submit"
           size="lg"
@@ -193,7 +212,7 @@ export function GalleryForm({
           {isSubmitting ? (
             <>
               <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />
-              Saving...
+              Saving…
             </>
           ) : (
             submitLabel
