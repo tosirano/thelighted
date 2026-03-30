@@ -48,7 +48,7 @@ export class AdminService {
 
     // Prevent creating another SUPER_ADMIN
     if (createUserDto.role === AdminRole.SUPER_ADMIN) {
-      throw new BadRequestException('Cannot create another super admin');
+      throw new ForbiddenException('Cannot create another super admin');
     }
 
     // Check if username already exists in this restaurant
@@ -85,14 +85,6 @@ export class AdminService {
     });
 
     await this.adminUserRepository.save(user);
-
-    // const savedUser = await this.adminUserRepository.save(user);
-
-    // // Reload user with restaurant relation to get restaurant details
-    // const userWithRestaurant = await this.adminUserRepository.findOne({
-    //   where: { id: savedUser.id },
-    //   relations: ['restaurant'],
-    // });
 
     return {
       message: 'User created successfully',
@@ -153,12 +145,12 @@ export class AdminService {
 
     // Prevent toggling own status
     if (admin.id === requesterId) {
-      throw new BadRequestException('Cannot toggle your own status');
+      throw new ForbiddenException('Cannot toggle your own status');
     }
 
     // Prevent toggling SUPER_ADMIN status
     if (admin.role === AdminRole.SUPER_ADMIN) {
-      throw new BadRequestException('Cannot toggle super admin status');
+      throw new ForbiddenException('Cannot toggle super admin status');
     }
 
     await this.adminUserRepository.update(adminId, { isActive });
@@ -185,12 +177,12 @@ export class AdminService {
 
     // Prevent assigning SUPER_ADMIN role
     if (role === AdminRole.SUPER_ADMIN) {
-      throw new BadRequestException('Cannot assign super admin role');
+      throw new ForbiddenException('Cannot assign super admin role');
     }
 
     // Find admin in this restaurant
     const admin = await this.adminUserRepository.findOne({
-      where: { id: adminId, restaurantId }, // ADD restaurantId filter
+      where: { id: adminId, restaurantId },
     });
 
     if (!admin) {
@@ -199,12 +191,12 @@ export class AdminService {
 
     // Prevent changing SUPER_ADMIN role
     if (admin.role === AdminRole.SUPER_ADMIN) {
-      throw new BadRequestException('Cannot change Super Admin role');
+      throw new ForbiddenException('Cannot change Super Admin role');
     }
 
     // Prevent changing own role
     if (admin.id === requesterId) {
-      throw new BadRequestException('Cannot change your own role');
+      throw new ForbiddenException('Cannot change your own role');
     }
 
     await this.adminUserRepository.update(adminId, { role: role as AdminRole });

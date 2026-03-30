@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { AdminUser, AdminRole } from './admin-user.entity';
 import { LoginDto, RegisterAdminDto, ChangePasswordDto } from './auth.dto';
 import { UpdateRegisterAdminDto } from './update-auth.dto';
@@ -22,6 +22,7 @@ export class AuthService {
     private readonly jwtService: JwtService,
     @InjectRepository(Restaurant)
     private readonly restaurantRepository: Repository<Restaurant>,
+    private readonly dataSource: DataSource,
   ) {}
 
   async login(loginDto: LoginDto) {
@@ -38,8 +39,8 @@ export class AuthService {
       throw new UnauthorizedException('Account is deactivated');
     }
 
-    // Check if restaurant is active
-    if (!admin.restaurant.isActive) {
+    // Check if restaurant exists and is active
+    if (!admin.restaurant || !admin.restaurant.isActive) {
       throw new UnauthorizedException('Restaurant account is deactivated');
     }
 
@@ -107,50 +108,64 @@ export class AuthService {
       );
     }
 
-    // Create restaurant first
-    const restaurant = this.restaurantRepository.create({
-      name: registerAdminDto.restaurantName,
-      slug,
-      phone: registerAdminDto.restaurantPhone,
-      email: registerAdminDto.restaurantEmail,
-      whatsappNumber: registerAdminDto.restaurantPhone,
-    });
+    // Use transaction to ensure restaurant + admin are created atomically
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
 
-    await this.restaurantRepository.save(restaurant);
+    try {
+      // Create restaurant first
+      const restaurant = this.restaurantRepository.create({
+        name: registerAdminDto.restaurantName,
+        slug,
+        phone: registerAdminDto.restaurantPhone,
+        email: registerAdminDto.restaurantEmail,
+        whatsappNumber: registerAdminDto.restaurantPhone,
+      });
 
-    // Create admin user with SUPER_ADMIN role and link to restaurant
-    const admin = this.adminUserRepository.create({
-      username: registerAdminDto.username,
-      email: registerAdminDto.email,
-      passwordHash: registerAdminDto.password, // Will be hashed by @BeforeInsert
-      role: AdminRole.SUPER_ADMIN,
-      restaurantId: restaurant.id,
-    });
+      await queryRunner.manager.save(restaurant);
 
-    await this.adminUserRepository.save(admin);
-
-    const payload = {
-      sub: admin.id,
-      username: admin.username,
-      role: admin.role,
-      restaurantId: restaurant.id,
-    };
-
-    return {
-      accessToken: this.jwtService.sign(payload),
-      user: {
-        id: admin.id,
-        username: admin.username,
-        email: admin.email,
-        role: admin.role,
-        lastLoginAt: admin.lastLoginAt,
-        createdAt: admin.createdAt,
-        isActive: admin.isActive,
+      // Create admin user with SUPER_ADMIN role and link to restaurant
+      const admin = this.adminUserRepository.create({
+        username: registerAdminDto.username,
+        email: registerAdminDto.email,
+        passwordHash: registerAdminDto.password, // Will be hashed by @BeforeInsert
+        role: AdminRole.SUPER_ADMIN,
         restaurantId: restaurant.id,
-        restaurantName: restaurant.name,
-        restaurantSlug: restaurant.slug,
-      },
-    };
+      });
+
+      await queryRunner.manager.save(admin);
+
+      await queryRunner.commitTransaction();
+
+      const payload = {
+        sub: admin.id,
+        username: admin.username,
+        role: admin.role,
+        restaurantId: restaurant.id,
+      };
+
+      return {
+        accessToken: this.jwtService.sign(payload),
+        user: {
+          id: admin.id,
+          username: admin.username,
+          email: admin.email,
+          role: admin.role,
+          lastLoginAt: admin.lastLoginAt,
+          createdAt: admin.createdAt,
+          isActive: admin.isActive,
+          restaurantId: restaurant.id,
+          restaurantName: restaurant.name,
+          restaurantSlug: restaurant.slug,
+        },
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   async changePassword(
@@ -188,31 +203,12 @@ export class AuthService {
     });
   }
 
-  // async createDefaultAdmin() {
-  //   const existingAdmin = await this.adminUserRepository.findOne({
-  //     where: { username: process.env.ADMIN_DEFAULT_USERNAME || 'admin' },
-  //   });
-
-  //   if (!existingAdmin) {
-  //     const admin = this.adminUserRepository.create({
-  //       username: process.env.ADMIN_DEFAULT_USERNAME || 'admin',
-  //       email: process.env.ADMIN_DEFAULT_EMAIL || 'admin@restaurant.com',
-  //       passwordHash: process.env.ADMIN_DEFAULT_PASSWORD || 'changeme123',
-  //       role: AdminRole.ADMIN,
-  //     });
-
-  //     await this.adminUserRepository.save(admin);
-  //     console.log('Default admin user created');
-  //   }
-  // }
-
   async updateUserProfile(
     id: string,
     updateUserDto: UpdateRegisterAdminDto,
     restaurantId: string,
   ) {
     try {
-      // check if user exists
       const existingUser = await this.adminUserRepository.findOne({
         where: { id, restaurantId },
       });
@@ -221,7 +217,6 @@ export class AuthService {
         throw new NotFoundException('User not found');
       }
 
-      // Use preload to properly merge the updates with the existing entity
       const userToUpdate = await this.adminUserRepository.preload({
         id: id,
         ...updateUserDto,
@@ -231,19 +226,13 @@ export class AuthService {
         throw new NotFoundException('User not found');
       }
 
-      // save the updated user
       const updatedUser = await this.adminUserRepository.save(userToUpdate);
-
-      // Explicitly fetch the updated user with relations to ensure we get the correct data
-      const finalUser = await this.adminUserRepository.findOne({
-        where: { id: updatedUser.id },
-      });
 
       return {
         user: {
-          id: finalUser.id,
-          username: finalUser.username,
-          email: finalUser.email,
+          id: updatedUser.id,
+          username: updatedUser.username,
+          email: updatedUser.email,
         },
       };
     } catch (error) {

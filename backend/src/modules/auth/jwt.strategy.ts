@@ -1,5 +1,6 @@
 // backend/src/modules/auth/jwt.strategy.ts
 import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -11,11 +12,12 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     @InjectRepository(AdminUser)
     private readonly adminUserRepository: Repository<AdminUser>,
+    configService: ConfigService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
       ignoreExpiration: false,
-      secretOrKey: process.env.JWT_SECRET || 'your-secret-key',
+      secretOrKey: configService.getOrThrow('JWT_SECRET'),
     });
   }
 
@@ -29,7 +31,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
       throw new UnauthorizedException();
     }
 
-    if (!admin.restaurant.isActive) {
+    if (!admin.restaurant || !admin.restaurant.isActive) {
       throw new UnauthorizedException('Restaurant account is deactivated');
     }
 

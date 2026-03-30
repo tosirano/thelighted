@@ -10,6 +10,7 @@ import {
   HttpStatus,
   Patch,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LoginDto, RegisterAdminDto, ChangePasswordDto } from './auth.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
@@ -21,12 +22,14 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(HttpStatus.OK)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   async login(@Body() loginDto: LoginDto) {
     return await this.authService.login(loginDto);
   }
 
   @Post('register')
   @HttpCode(HttpStatus.CREATED)
+  @Throttle({ default: { limit: 3, ttl: 60000 } })
   async register(@Body() registerAdminDto: RegisterAdminDto) {
     return await this.authService.register(registerAdminDto);
   }
