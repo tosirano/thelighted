@@ -1,7 +1,7 @@
 // frontend/src/lib/api/client.ts
 import { useAuthStore } from "@/lib/store/authStore";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:9001/api";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:9002/api";
 
 export class ApiError extends Error {
   constructor(message: string, public status: number, public data?: any) {
@@ -31,12 +31,12 @@ async function fetchWithAuth(
   });
 
   // Handle 401 Unauthorized - clear auth and redirect
-  // if (response.status === 401) {
-  //   useAuthStore.getState().clearAuth();
-  //   if (typeof window !== "undefined") {
-  //     window.location.href = "/admin/login";
-  //   }
-  // }
+  if (response.status === 401) {
+    useAuthStore.getState().clearAuth();
+    if (typeof window !== "undefined") {
+      window.location.href = "/login";
+    }
+  }
 
   return response;
 }

@@ -18,7 +18,7 @@ import { Restaurant } from '../restaurant/restaurant.entity';
       imports: [ConfigModule],
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => ({
-        secret: configService.get('JWT_SECRET') || 'your-secret-key',
+        secret: configService.getOrThrow('JWT_SECRET'),
         signOptions: {
           expiresIn: configService.get('JWT_EXPIRES_IN') || '1d',
         },

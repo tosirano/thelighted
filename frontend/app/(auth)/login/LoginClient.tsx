@@ -6,7 +6,7 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
-import { adminApi } from "@/lib/api/api";
+import { adminApi } from "@/lib/api/admin";
 import { useAuthStore } from "@/lib/store/authStore";
 import Link from "next/link";
 
@@ -44,7 +44,7 @@ export default function LoginClient() {
 
     try {
       const response = await adminApi.login(data);
-      setAuth(response.user, response.token);
+      setAuth(response.user, response.accessToken);
       router.push("/admin/dashboard");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Login failed");
@@ -147,7 +147,7 @@ export default function LoginClient() {
               <p className="text-sm text-gray-600">
                 Don't have an account?{" "}
                 <Link
-                  href="/register"
+                  href="/admin-registration"
                   className="font-medium text-indigo-600 hover:text-indigo-500"
                 >
                   Register
