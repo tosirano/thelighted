@@ -53,7 +53,7 @@ const getActionColor = (action: string) => {
   }
 };
 
-export function RecentActivity({ logs }: RecentActivityProps) {
+export default function RecentActivity({ logs }: RecentActivityProps) {
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}

@@ -22,7 +22,7 @@ interface PopularItemsChartProps {
   items: PopularItem[];
 }
 
-export function PopularItemsChart({ items }: PopularItemsChartProps) {
+export default function PopularItemsChart({ items }: PopularItemsChartProps) {
   const chartData = items.map((item) => ({
     name:
       item.name.length > 15 ? item.name.substring(0, 15) + "..." : item.name,

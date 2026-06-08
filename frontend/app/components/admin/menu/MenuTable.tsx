@@ -28,7 +28,7 @@ interface MenuTableProps {
   onDelete: (id: string) => Promise<void>;
 }
 
-export function MenuTable({
+export default function MenuTable({
   items,
   onToggleAvailability,
   onDelete,
