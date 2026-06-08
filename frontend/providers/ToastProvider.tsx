@@ -1,11 +1,14 @@
 // frontend/src/providers/ToastProvider.tsx
 "use client";
 
+import { ReactNode } from "react";
 import { Toaster } from "react-hot-toast";
 
-export function ToastProvider() {
+export function ToastProvider({ children }: { children?: ReactNode }) {
   return (
-    <Toaster
+    <>
+      {children}
+      <Toaster
       position="top-right"
       toastOptions={{
         duration: 4000,
@@ -31,5 +34,6 @@ export function ToastProvider() {
         },
       }}
     />
+    </>
   );
 }

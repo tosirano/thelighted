@@ -15,7 +15,7 @@ const schema = z.object({
   email: z.string().email("Valid email required"),
   password: z.string().min(8, "Password must be at least 8 characters"),
   role: z.enum([AdminRole.STAFF, AdminRole.MANAGER, AdminRole.ADMIN], {
-    required_error: "Role is required",
+    message: "Role is required",
   }),
 });
 
