@@ -115,7 +115,7 @@ export default function DashboardClient() {
           {loadingAnalytics ? (
             <div className="h-64 animate-pulse rounded-xl bg-gray-200" />
           ) : (
-            <PopularItemsChart data={analytics?.popularItems ?? []} />
+            <PopularItemsChart items={analytics?.popularItems ?? []} />
           )}
           <QuickActions />
         </div>
