@@ -83,6 +83,8 @@ pub enum DataKey {
     RestaurantOrders(u64),
     /// Ordered list of order IDs for a customer.
     CustomerOrders(Address),
+    /// Whether the contract is paused.
+    Paused,
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +132,7 @@ impl OrderContract {
         notes: String,
     ) -> u64 {
         customer.require_auth();
+        Self::assert_not_paused_for(&env, &customer);
 
         if items.is_empty() {
             panic!("order must contain at least one item");
@@ -191,6 +194,7 @@ impl OrderContract {
     /// - The admin may cancel at any time (for dispute resolution).
     pub fn cancel_order(env: Env, caller: Address, order_id: u64) {
         caller.require_auth();
+        Self::assert_not_paused_for(&env, &caller);
 
         let mut order = Self::load_order(&env, order_id);
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -332,6 +336,40 @@ impl OrderContract {
         }
     }
 
+    fn assert_not_paused_for(env: &Env, caller: &Address) {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if caller != &admin {
+                panic!("contract is paused");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / unpause
+    // -----------------------------------------------------------------------
+
+    /// Pause the contract (admin only).
+    pub fn pause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+    }
+
+    /// Unpause the contract (admin only).
+    pub fn unpause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+    }
+
     fn append_to_list(env: &Env, key: DataKey, id: u64, ttl: u32) {
         let mut list: Vec<u64> = env
             .storage()
@@ -457,5 +495,46 @@ mod test {
 
         let orders = client.get_restaurant_orders(&7);
         assert_eq!(orders.len(), 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_pause_blocks_place_order() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause_contract(&admin);
+
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    fn test_pause_admin_can_still_advance() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+        client.pause_contract(&admin);
+        client.advance_status(&admin, &id);
+        assert_eq!(client.get_order(&id).status, OrderStatus::Confirmed);
+    }
+
+    #[test]
+    fn test_unpause_restores_place_order() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause_contract(&admin);
+        client.unpause_contract(&admin);
+
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+        assert_eq!(client.get_order(&id).status, OrderStatus::Pending);
     }
 }

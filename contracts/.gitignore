@@ -1,2 +1,5 @@
 # Rust build artifacts
 target/
+
+# Soroban test snapshots
+**/test_snapshots/

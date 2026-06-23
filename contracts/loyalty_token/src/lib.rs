@@ -43,6 +43,8 @@ pub enum DataKey {
     Balance(Address),
     /// Allowances: (owner, spender) → (amount, expiration_ledger).
     Allowance(Address, Address),
+    /// Whether the contract is paused.
+    Paused,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +119,7 @@ impl LoyaltyToken {
     pub fn mint(env: Env, caller: Address, to: Address, amount: i128) {
         caller.require_auth();
         Self::assert_admin_or_minter(&env, &caller);
+        Self::assert_not_paused_for(&env, &caller);
 
         if amount <= 0 {
             panic!("amount must be positive");
@@ -137,6 +140,31 @@ impl LoyaltyToken {
 
         env.events()
             .publish((symbol_short!("mint"), symbol_short!("BITE")), (to, amount));
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / unpause
+    // -----------------------------------------------------------------------
+
+    /// Pause the contract (admin only). All state-mutating calls by non-admins
+    /// will be rejected while paused.
+    pub fn pause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+    }
+
+    /// Unpause the contract (admin only).
+    pub fn unpause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
     }
 
     /// Update the authorised minter address (admin only).
@@ -167,6 +195,7 @@ impl LoyaltyToken {
     /// Transfer `amount` BITE from `from` to `to`.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
+        Self::assert_not_paused_for(&env, &from);
         Self::do_transfer(&env, &from, &to, amount);
     }
 
@@ -187,6 +216,7 @@ impl LoyaltyToken {
         expiration_ledger: u32,
     ) {
         from.require_auth();
+        Self::assert_not_paused_for(&env, &from);
         if amount < 0 {
             panic!("allowance amount cannot be negative");
         }
@@ -217,6 +247,7 @@ impl LoyaltyToken {
     /// Transfer `amount` on behalf of `from` using a prior allowance.
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
         spender.require_auth();
+        Self::assert_not_paused_for(&env, &spender);
 
         let current = Self::get_allowance(&env, &from, &spender);
         if current < amount {
@@ -242,12 +273,14 @@ impl LoyaltyToken {
     /// Burn `amount` BITE from `from`'s account.
     pub fn burn(env: Env, from: Address, amount: i128) {
         from.require_auth();
+        Self::assert_not_paused_for(&env, &from);
         Self::do_burn(&env, &from, amount);
     }
 
     /// Burn `amount` BITE from `from` using a spender's allowance.
     pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
         spender.require_auth();
+        Self::assert_not_paused_for(&env, &spender);
 
         let current = Self::get_allowance(&env, &from, &spender);
         if current < amount {
@@ -384,6 +417,16 @@ impl LoyaltyToken {
         }
     }
 
+    fn assert_not_paused_for(env: &Env, caller: &Address) {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if caller != &admin {
+                panic!("contract is paused");
+            }
+        }
+    }
+
     fn assert_admin_or_minter(env: &Env, caller: &Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         let minter: Address = env.storage().instance().get(&DataKey::Minter).unwrap();
@@ -491,5 +534,43 @@ mod test {
         let (env, client, _admin) = setup();
         let rando = Address::generate(&env);
         client.mint(&rando, &rando, &1_000_000);
+    }
+
+    #[test]
+    fn test_pause_blocks_user_and_admin_can_still_act() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+
+        client.mint(&admin, &user, &1_000_000);
+        client.pause_contract(&admin);
+
+        // Admin can still mint while paused.
+        client.mint(&admin, &user, &500_000);
+        assert_eq!(client.balance(&user), 1_500_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_pause_blocks_user_transfer() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        let other = Address::generate(&env);
+
+        client.mint(&admin, &user, &1_000_000);
+        client.pause_contract(&admin);
+        client.transfer(&user, &other, &100_000);
+    }
+
+    #[test]
+    fn test_unpause_restores_user_operations() {
+        let (env, client, admin) = setup();
+        let user = Address::generate(&env);
+        let other = Address::generate(&env);
+
+        client.mint(&admin, &user, &1_000_000);
+        client.pause_contract(&admin);
+        client.unpause_contract(&admin);
+        client.transfer(&user, &other, &100_000);
+        assert_eq!(client.balance(&other), 100_000);
     }
 }

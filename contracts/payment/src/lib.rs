@@ -75,6 +75,8 @@ pub enum DataKey {
     /// Fee in basis points (100 bps = 1 %). Default: 100 (1 %).
     FeeBps,
     Payment(u64),
+    /// Whether the contract is paused.
+    Paused,
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +136,7 @@ impl PaymentContract {
         amount: i128,
     ) {
         payer.require_auth();
+        Self::assert_not_paused_for(&env, &payer);
 
         if env.storage().persistent().has(&DataKey::Payment(order_id)) {
             panic!("payment already exists for this order");
@@ -189,6 +192,7 @@ impl PaymentContract {
     /// restaurant wallet.
     pub fn release_payment(env: Env, caller: Address, order_id: u64) {
         caller.require_auth();
+        Self::assert_not_paused_for(&env, &caller);
 
         let mut payment: Payment = env
             .storage()
@@ -248,6 +252,7 @@ impl PaymentContract {
     pub fn refund_payment(env: Env, caller: Address, order_id: u64) {
         caller.require_auth();
         Self::assert_admin_or_panic(&env, &caller);
+        // Admin can always refund, even while paused – no pause guard here.
 
         let mut payment: Payment = env
             .storage()
@@ -335,10 +340,41 @@ impl PaymentContract {
             panic!("unauthorized: admin only");
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// Tests
+    fn assert_not_paused_for(env: &Env, caller: &Address) {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if caller != &admin {
+                panic!("contract is paused");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / unpause
+    // -----------------------------------------------------------------------
+
+    /// Pause the contract (admin only).
+    pub fn pause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+    }
+
+    /// Unpause the contract (admin only).
+    pub fn unpause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+    }
+}
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -435,5 +471,52 @@ mod test {
 
         client.escrow_payment(&payer, &3, &restaurant, &token_addr, &20_000_000);
         client.escrow_payment(&payer, &3, &restaurant, &token_addr, &20_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_pause_blocks_escrow() {
+        let (env, client, admin, _treasury, _cid) = setup();
+        let token_admin = Address::generate(&env);
+        let payer = Address::generate(&env);
+        let restaurant = Address::generate(&env);
+
+        let (token_addr, sac) = create_token(&env, &token_admin);
+        sac.mint(&payer, &50_000_000);
+
+        client.pause_contract(&admin);
+        client.escrow_payment(&payer, &10, &restaurant, &token_addr, &10_000_000);
+    }
+
+    #[test]
+    fn test_pause_admin_can_still_release() {
+        let (env, client, admin, _treasury, _cid) = setup();
+        let token_admin = Address::generate(&env);
+        let payer = Address::generate(&env);
+        let restaurant = Address::generate(&env);
+
+        let (token_addr, sac) = create_token(&env, &token_admin);
+        sac.mint(&payer, &50_000_000);
+
+        client.escrow_payment(&payer, &11, &restaurant, &token_addr, &50_000_000);
+        client.pause_contract(&admin);
+        client.release_payment(&admin, &11);
+        assert_eq!(client.get_payment(&11).status, PaymentStatus::Released);
+    }
+
+    #[test]
+    fn test_unpause_restores_escrow() {
+        let (env, client, admin, _treasury, _cid) = setup();
+        let token_admin = Address::generate(&env);
+        let payer = Address::generate(&env);
+        let restaurant = Address::generate(&env);
+
+        let (token_addr, sac) = create_token(&env, &token_admin);
+        sac.mint(&payer, &50_000_000);
+
+        client.pause_contract(&admin);
+        client.unpause_contract(&admin);
+        client.escrow_payment(&payer, &12, &restaurant, &token_addr, &10_000_000);
+        assert_eq!(client.get_payment(&12).status, PaymentStatus::Escrowed);
     }
 }
