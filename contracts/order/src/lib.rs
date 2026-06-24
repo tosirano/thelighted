@@ -24,6 +24,17 @@ use soroban_sdk::{
 };
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum allowed unit price per line item (in stroops).
+/// Prevents individual item prices from causing subtotal overflow.
+const MAX_ITEM_UNIT_PRICE: i128 = 1_000_000_000_000; // 100,000 XLM
+
+/// Maximum allowed order total (in stroops).
+const MAX_ORDER_TOTAL: i128 = 100_000_000_000_000; // 10,000,000 XLM
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -135,7 +146,7 @@ impl OrderContract {
             panic!("order must contain at least one item");
         }
 
-        // Compute total from items.
+        // Compute total from items using checked arithmetic to prevent overflow.
         let mut total: i128 = 0;
         for item in items.iter() {
             if item.quantity == 0 {
@@ -144,7 +155,19 @@ impl OrderContract {
             if item.unit_price <= 0 {
                 panic!("unit price must be positive");
             }
-            total += item.unit_price * item.quantity as i128;
+            if item.unit_price > MAX_ITEM_UNIT_PRICE {
+                panic!("unit price exceeds maximum");
+            }
+            let subtotal = item
+                .unit_price
+                .checked_mul(item.quantity as i128)
+                .expect("order item subtotal overflow");
+            total = total
+                .checked_add(subtotal)
+                .expect("order total overflow");
+            if total > MAX_ORDER_TOTAL {
+                panic!("order exceeds maximum total");
+            }
         }
 
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
@@ -457,5 +480,75 @@ mod test {
 
         let orders = client.get_restaurant_orders(&7);
         assert_eq!(orders.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow / validation tests (acceptance criteria for issue CO-01)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_overflow_quantity_max_and_large_price() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        // quantity = u32::MAX, unit_price = i128::MAX / 2 — must panic descriptively
+        let items = vec![&env, make_item(&env, 1, u32::MAX, i128::MAX / 2)];
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    fn test_valid_multi_item_order_calculates_correct_total() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+
+        let items = vec![
+            &env,
+            make_item(&env, 1, 3, 5_000_000),
+            make_item(&env, 2, 2, 7_000_000),
+        ];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+        let order = client.get_order(&id);
+        // 3 * 5_000_000 + 2 * 7_000_000 = 15_000_000 + 14_000_000 = 29_000_000
+        assert_eq!(order.total_amount, 29_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "order exceeds maximum total")]
+    fn test_order_exceeds_max_total_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        // 101 items at MAX_ITEM_UNIT_PRICE each => 101 * 1T = 101T > MAX_ORDER_TOTAL (100T)
+        let items = vec![&env, make_item(&env, 1, 101, 1_000_000_000_000)];
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    #[should_panic(expected = "unit price exceeds maximum")]
+    fn test_unit_price_above_max_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        let items = vec![&env, make_item(&env, 1, 1, 1_000_000_000_001)]; // 1 above MAX
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    fn test_no_unchecked_arithmetic_at_exact_max_total() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        // 100 items at MAX_ITEM_UNIT_PRICE == MAX_ORDER_TOTAL exactly (should pass)
+        let items = vec![&env, make_item(&env, 1, 100, 1_000_000_000_000)];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+        let order = client.get_order(&id);
+        assert_eq!(order.total_amount, 100_000_000_000_000);
     }
 }
