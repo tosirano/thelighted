@@ -5,6 +5,9 @@ use soroban_sdk::{
     Vec,
 };
 
+/// Orders that remain unfinished longer than this are eligible for expiry.
+const ORDER_TTL_SECONDS: u64 = 172_800; // 48 hours
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -53,6 +56,8 @@ pub struct Order {
     pub created_at: u64,
     pub updated_at: u64,
     pub notes: String,
+    /// Unix timestamp after which the order may be expired by anyone.
+    pub expires_at: u64,
 }
 
 #[contracttype]
@@ -148,6 +153,7 @@ impl OrderContract {
             created_at: now,
             updated_at: now,
             notes,
+            expires_at: now + ORDER_TTL_SECONDS,
         };
 
         let ttl: u32 = 2_073_600;
@@ -208,6 +214,10 @@ impl OrderContract {
         Self::assert_admin_or_panic(&env, &caller);
 
         let mut order = Self::load_order(&env, order_id);
+
+        if env.ledger().timestamp() > order.expires_at {
+            panic!("order has expired");
+        }
 
         order.status = match order.status {
             OrderStatus::Pending => OrderStatus::Confirmed,
@@ -494,5 +504,90 @@ mod test {
         let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
         let order = client.get_order(&id);
         assert_eq!(order.total_amount, 100_000_000_000_000);
+    }
+
+    // ── Expiry tests ────────────────────────────────────────────────────────
+
+    fn place_one(env: &Env, client: &OrderContractClient, admin: &Address) -> u64 {
+        let customer = Address::generate(env);
+        let items = vec![env, make_item(env, 1, 1, 5_000_000)];
+        client.initialize(admin);
+        client.place_order(&customer, &1, &items, &String::from_str(env, ""))
+    }
+
+    #[test]
+    #[should_panic(expected = "order not yet expired")]
+    fn test_expire_order_before_deadline_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        // timestamp is 0; expires_at = 172800 — still within window
+        let id = place_one(&env, &client, &admin);
+        client.expire_order(&id);
+    }
+
+    #[test]
+    fn test_expire_order_after_deadline_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        // Jump past the 48-hour deadline
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+
+        client.expire_order(&id);
+        assert_eq!(client.get_order(&id).status, OrderStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_expire_order_callable_by_anyone() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+
+        // No auth required — a random third party can call expire_order
+        client.expire_order(&id);
+        assert_eq!(client.get_order(&id).status, OrderStatus::Cancelled);
+    }
+
+    #[test]
+    #[should_panic(expected = "order has expired")]
+    fn test_advance_status_on_expired_order_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+
+        client.advance_status(&admin, &id);
+    }
+
+    #[test]
+    fn test_expire_order_emits_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+        client.expire_order(&id);
+
+        // Confirm at least one event was emitted during expire_order
+        assert!(!env.events().all().is_empty());
+    }
+
+    #[test]
+    fn test_place_order_sets_expires_at() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+
+        let order = client.get_order(&id);
+        assert_eq!(order.expires_at, 1_000 + super::ORDER_TTL_SECONDS);
     }
 }
