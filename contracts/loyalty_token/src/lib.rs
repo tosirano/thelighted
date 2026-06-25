@@ -37,13 +37,15 @@ use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, E
 pub enum DataKey {
     /// The platform admin who controls minting.
     Admin,
+    /// Proposed but not yet confirmed new admin (two-step transfer).
+    PendingAdmin,
     /// Optional secondary minter (e.g. the Order contract address).
     Minter,
     /// Total tokens in circulation.
     TotalSupply,
     /// Per-account balances.
     Balance(Address),
-    /// Allowances: (owner, spender) ? (amount, expiration_ledger).
+    /// Allowances: (owner, spender) -> (amount, expiration_ledger).
     Allowance(Address, Address),
 }
 
@@ -76,7 +78,7 @@ pub struct LoyaltyToken;
 #[contractimpl]
 impl LoyaltyToken {
     // Initialisation
-    
+
     /// Deploy the BITE token.
     ///
     /// # Arguments
@@ -136,11 +138,51 @@ impl LoyaltyToken {
         env.storage().instance().extend_ttl(17_280, 17_280);
     }
 
-    /// Transfer the admin role.
+    /// Step 1: propose a new admin. Does NOT change the active admin.
+    ///
+    /// Emits `(symbol_short!("admin"), symbol_short!("proposed"))`.
+    /// The new admin must call `accept_admin` to take effect.
     pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
         caller.require_auth();
         Self::assert_admin_or_panic(&env, &caller);
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("proposed")),
+            (caller, new_admin),
+        );
+    }
+
+    /// Step 2: accept a pending admin transfer. Caller must be `PendingAdmin`.
+    ///
+    /// Promotes caller to `Admin`, clears `PendingAdmin`,
+    /// and emits `(symbol_short!("admin"), symbol_short!("accepted"))`.
+    pub fn accept_admin(env: Env, caller: Address) {
+        caller.require_auth();
+        let pending: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .expect("not pending admin");
+        if caller != pending {
+            panic!("not pending admin");
+        }
+        env.storage().instance().set(&DataKey::Admin, &caller);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events().publish(
+            (symbol_short!("admin"), symbol_short!("accepted")),
+            caller,
+        );
+    }
+
+    /// Cancel a pending admin transfer. Only the current admin may call this.
+    ///
+    /// Clears `PendingAdmin` without changing the active admin.
+    pub fn cancel_transfer(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         env.storage().instance().extend_ttl(17_280, 17_280);
     }
 
@@ -483,6 +525,88 @@ mod test {
         let (env, client, _admin) = setup();
         let rando = Address::generate(&env);
         client.mint(&rando, &rando, &1_000_000);
+    }
+
+    // Two-step admin transfer tests
+
+    #[test]
+    fn test_transfer_admin_does_not_change_active_admin() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+        // propose but do not accept
+        client.transfer_admin(&admin, &new_admin);
+        // old admin can still mint
+        let user = Address::generate(&env);
+        client.mint(&admin, &user, &100);
+        assert_eq!(client.balance(&user), 100);
+    }
+
+    #[test]
+    fn test_happy_path_propose_accept_old_admin_locked_out() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        // Step 1: propose
+        client.transfer_admin(&admin, &new_admin);
+
+        // Step 2: accept
+        client.accept_admin(&new_admin);
+
+        // new admin can mint
+        let user = Address::generate(&env);
+        client.mint(&new_admin, &user, &500);
+        assert_eq!(client.balance(&user), 500);
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized: admin only")]
+    fn test_old_admin_cannot_mint_after_accept() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+        client.accept_admin(&new_admin);
+
+        // old admin should fail
+        let user = Address::generate(&env);
+        client.mint(&admin, &user, &100);
+    }
+
+    #[test]
+    #[should_panic(expected = "not pending admin")]
+    fn test_accept_admin_wrong_address_panics() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+        let rando = Address::generate(&env);
+
+        client.transfer_admin(&admin, &new_admin);
+        // rando tries to accept
+        client.accept_admin(&rando);
+    }
+
+    #[test]
+    fn test_cancel_transfer_clears_pending_admin() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+
+        // propose then cancel
+        client.transfer_admin(&admin, &new_admin);
+        client.cancel_transfer(&admin);
+
+        // old admin still active
+        let user = Address::generate(&env);
+        client.mint(&admin, &user, &100);
+        assert_eq!(client.balance(&user), 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "not pending admin")]
+    fn test_accept_after_cancel_panics() {
+        let (env, client, admin) = setup();
+        let new_admin = Address::generate(&env);
+        client.transfer_admin(&admin, &new_admin);
+        client.cancel_transfer(&admin);
+        // accept should now panic since PendingAdmin is cleared
+        client.accept_admin(&new_admin);
     }
 
     #[test]
