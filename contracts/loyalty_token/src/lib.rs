@@ -1,18 +1,55 @@
+//! # Loyalty Token Contract  (BITE)
+//!
+//! A SEP-41 compatible fungible token that powers the restaurant platform's
+//! customer loyalty programme.
+//!
+//! ## Token details
+//! | Field   | Value          |
+//! |---------|----------------|
+//! | Name    | Bite Rewards   |
+//! | Symbol  | BITE           |
+//! | Decimals| 7              |
+//!
+//! ## Earning BITE
+//! The admin (or an authorised minter - typically the Order contract) calls
+//! `mint` after an order is marked *Delivered*.  A suggested policy is:
+//! **1 BITE per 10 000 stroops (0.001 XLM) spent**.
+//!
+//! ## Redeeming BITE
+//! A customer `burn`s their BITE tokens and the backend applies a discount to
+//! the next order.  The redemption rate is managed off-chain.
+//!
+//! ## SEP-41 surface
+//! Implements the full `token::Interface` trait so the token appears correctly
+//! in Stellar wallets.
+
 #![no_std]
+
+/// Minimum ledger window for a non-zero allowance (~24 h at 5-second close time).
+const MIN_APPROVAL_VALIDITY_LEDGERS: u32 = 17_280;
+/// Maximum ledger window for an allowance (~1 year).
+const MAX_APPROVAL_VALIDITY_LEDGERS: u32 = 6_307_200;
 
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
 
+// Storage keys
 #[contracttype]
 pub enum DataKey {
+    /// The platform admin who controls minting.
     Admin,
     /// Proposed but not yet confirmed new admin (two-step transfer).
     PendingAdmin,
+    /// Optional secondary minter (e.g. the Order contract address).
     Minter,
+    /// Total tokens in circulation.
     TotalSupply,
+    /// Per-account balances.
     Balance(Address),
+    /// Allowances: (owner, spender) -> (amount, expiration_ledger).
     Allowance(Address, Address),
 }
 
+// Token metadata (stored once at init)
 #[contracttype]
 #[derive(Clone)]
 pub struct TokenMeta {
@@ -26,6 +63,7 @@ pub enum MetaKey {
     Meta,
 }
 
+// Allowance helper struct
 #[contracttype]
 #[derive(Clone)]
 pub struct AllowanceData {
@@ -33,11 +71,19 @@ pub struct AllowanceData {
     pub expiration_ledger: u32,
 }
 
+// Contract
 #[contract]
 pub struct LoyaltyToken;
 
 #[contractimpl]
 impl LoyaltyToken {
+    // Initialisation
+
+    /// Deploy the BITE token.
+    ///
+    /// # Arguments
+    /// - `admin`  - address with mint authority.
+    /// - `minter` - optional secondary minter (pass `admin` to disable).
     pub fn initialize(env: Env, admin: Address, minter: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
@@ -56,6 +102,9 @@ impl LoyaltyToken {
         env.storage().instance().extend_ttl(17_280, 17_280);
     }
 
+    // Admin / Minter actions
+
+    /// Mint `amount` BITE to `to`.  Only callable by admin or minter.
     pub fn mint(env: Env, caller: Address, to: Address, amount: i128) {
         caller.require_auth();
         Self::assert_admin_or_minter(&env, &caller);
@@ -67,13 +116,21 @@ impl LoyaltyToken {
         let new_balance = Self::balance_of(&env, &to) + amount;
         Self::set_balance(&env, &to, new_balance);
 
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply + amount));
+        let supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &(supply + amount));
         env.storage().instance().extend_ttl(17_280, 17_280);
 
-        env.events().publish((symbol_short!("mint"), symbol_short!("BITE")), (to, amount));
+        env.events()
+            .publish((symbol_short!("mint"), symbol_short!("BITE")), (to, amount));
     }
 
+    /// Update the authorised minter address (admin only).
     pub fn set_minter(env: Env, caller: Address, new_minter: Address) {
         caller.require_auth();
         Self::assert_admin_or_panic(&env, &caller);
@@ -129,34 +186,65 @@ impl LoyaltyToken {
         env.storage().instance().extend_ttl(17_280, 17_280);
     }
 
+    // SEP-41 token interface
 
+    /// Return the token balance of `account`.
     pub fn balance(env: Env, account: Address) -> i128 {
         Self::balance_of(&env, &account)
     }
 
+    /// Transfer `amount` BITE from `from` to `to`.
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
         from.require_auth();
         Self::do_transfer(&env, &from, &to, amount);
     }
 
+    /// Return the current allowance for `spender` to spend on behalf of `from`.
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
         Self::get_allowance(&env, &from, &spender)
     }
 
-    pub fn approve(env: Env, from: Address, spender: Address, amount: i128, expiration_ledger: u32) {
+    /// Approve `spender` to transfer up to `amount` on behalf of `from`.
+    ///
+    /// `expiration_ledger` is the **last ledger** at which the approval is valid
+    /// (inclusive). The allowance returns 0 on `expiration_ledger + 1`.
+    /// Pass `0` for both `amount` and `expiration_ledger` to revoke.
+    ///
+    /// Non-zero approvals must satisfy:
+    ///   `current + MIN_APPROVAL_VALIDITY_LEDGERS <= expiration_ledger <= current + MAX_APPROVAL_VALIDITY_LEDGERS`
+    pub fn approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        expiration_ledger: u32,
+    ) {
         from.require_auth();
         if amount < 0 {
             panic!("allowance amount cannot be negative");
         }
-        if amount > 0 && expiration_ledger < env.ledger().sequence() {
-            panic!("expiration_ledger is in the past");
+        if amount > 0 {
+            let current = env.ledger().sequence();
+            if expiration_ledger < current.saturating_add(MIN_APPROVAL_VALIDITY_LEDGERS) {
+                panic!("expiration too soon");
+            }
+            if expiration_ledger > current.saturating_add(MAX_APPROVAL_VALIDITY_LEDGERS) {
+                panic!("expiration too far in the future");
+            }
         }
-        let data = AllowanceData { amount, expiration_ledger };
+        let data = AllowanceData {
+            amount,
+            expiration_ledger,
+        };
         let ttl = expiration_ledger.saturating_sub(env.ledger().sequence());
-        env.storage().temporary().set(&DataKey::Allowance(from.clone(), spender.clone()), &data);
+        env.storage()
+            .temporary()
+            .set(&DataKey::Allowance(from.clone(), spender.clone()), &data);
         if ttl > 0 {
             env.storage().temporary().extend_ttl(
-                &DataKey::Allowance(from.clone(), spender.clone()), ttl, ttl,
+                &DataKey::Allowance(from.clone(), spender.clone()),
+                ttl,
+                ttl,
             );
         }
         env.events().publish(
@@ -165,6 +253,7 @@ impl LoyaltyToken {
         );
     }
 
+    /// Transfer `amount` on behalf of `from` using a prior allowance.
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
         spender.require_auth();
 
@@ -173,20 +262,29 @@ impl LoyaltyToken {
             panic!("insufficient allowance");
         }
 
+        // Decrement allowance.
         let allowance_key = DataKey::Allowance(from.clone(), spender.clone());
-        let mut data: AllowanceData = env.storage().temporary().get(&allowance_key)
-            .unwrap_or(AllowanceData { amount: 0, expiration_ledger: 0 });
+        let mut data: AllowanceData =
+            env.storage()
+                .temporary()
+                .get(&allowance_key)
+                .unwrap_or(AllowanceData {
+                    amount: 0,
+                    expiration_ledger: 0,
+                });
         data.amount -= amount;
         env.storage().temporary().set(&allowance_key, &data);
 
         Self::do_transfer(&env, &from, &to, amount);
     }
 
+    /// Burn `amount` BITE from `from`'s account.
     pub fn burn(env: Env, from: Address, amount: i128) {
         from.require_auth();
         Self::do_burn(&env, &from, amount);
     }
 
+    /// Burn `amount` BITE from `from` using a spender's allowance.
     pub fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
         spender.require_auth();
 
@@ -196,13 +294,21 @@ impl LoyaltyToken {
         }
 
         let allowance_key = DataKey::Allowance(from.clone(), spender.clone());
-        let mut data: AllowanceData = env.storage().temporary().get(&allowance_key)
-            .unwrap_or(AllowanceData { amount: 0, expiration_ledger: 0 });
+        let mut data: AllowanceData =
+            env.storage()
+                .temporary()
+                .get(&allowance_key)
+                .unwrap_or(AllowanceData {
+                    amount: 0,
+                    expiration_ledger: 0,
+                });
         data.amount -= amount;
         env.storage().temporary().set(&allowance_key, &data);
 
         Self::do_burn(&env, &from, amount);
     }
+
+    // Token metadata (SEP-41)
 
     pub fn name(env: Env) -> String {
         let meta: TokenMeta = env.storage().instance().get(&MetaKey::Meta).unwrap();
@@ -220,17 +326,29 @@ impl LoyaltyToken {
     }
 
     pub fn total_supply(env: Env) -> i128 {
-        env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0)
     }
 
+    // Private helpers
+
     fn balance_of(env: &Env, account: &Address) -> i128 {
-        env.storage().persistent().get(&DataKey::Balance(account.clone())).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&DataKey::Balance(account.clone()))
+            .unwrap_or(0)
     }
 
     fn set_balance(env: &Env, account: &Address, amount: i128) {
         let ttl: u32 = 2_073_600;
-        env.storage().persistent().set(&DataKey::Balance(account.clone()), &amount);
-        env.storage().persistent().extend_ttl(&DataKey::Balance(account.clone()), ttl, ttl);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Balance(account.clone()), &amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Balance(account.clone()), ttl, ttl);
     }
 
     fn do_transfer(env: &Env, from: &Address, to: &Address, amount: i128) {
@@ -260,20 +378,38 @@ impl LoyaltyToken {
         }
         Self::set_balance(env, from, bal - amount);
 
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
+        let supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &(supply - amount));
         env.storage().instance().extend_ttl(17_280, 17_280);
 
-        env.events().publish((symbol_short!("burn"), symbol_short!("BITE")), (from.clone(), amount));
+        env.events().publish(
+            (symbol_short!("burn"), symbol_short!("BITE")),
+            (from.clone(), amount),
+        );
     }
 
     fn get_allowance(env: &Env, from: &Address, spender: &Address) -> i128 {
-        let data: Option<AllowanceData> = env.storage().temporary()
+        let data: Option<AllowanceData> = env
+            .storage()
+            .temporary()
             .get(&DataKey::Allowance(from.clone(), spender.clone()));
+
         match data {
             None => 0,
             Some(d) => {
-                if env.ledger().sequence() > d.expiration_ledger { 0 } else { d.amount }
+                // expiration_ledger is inclusive: the allowance is valid through
+                // and including that ledger; it returns 0 on expiration_ledger + 1.
+                if env.ledger().sequence() > d.expiration_ledger {
+                    0
+                } else {
+                    d.amount
+                }
             }
         }
     }
@@ -294,7 +430,7 @@ impl LoyaltyToken {
     }
 }
 
-
+// Tests
 #[cfg(test)]
 mod test {
     use super::*;
@@ -307,7 +443,7 @@ mod test {
         let cid = env.register(LoyaltyToken, ());
         let client = LoyaltyTokenClient::new(&env, &cid);
         let admin = Address::generate(&env);
-        client.initialize(&admin, &admin);
+        client.initialize(&admin, &admin); // admin is also minter
         (env, client, admin)
     }
 
@@ -323,6 +459,7 @@ mod test {
     fn test_mint_and_balance() {
         let (env, client, admin) = setup();
         let user = Address::generate(&env);
+
         client.mint(&admin, &user, &1_000_000);
         assert_eq!(client.balance(&user), 1_000_000);
         assert_eq!(client.total_supply(), 1_000_000);
@@ -333,8 +470,10 @@ mod test {
         let (env, client, admin) = setup();
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
+
         client.mint(&admin, &alice, &500_000);
         client.transfer(&alice, &bob, &200_000);
+
         assert_eq!(client.balance(&alice), 300_000);
         assert_eq!(client.balance(&bob), 200_000);
     }
@@ -344,10 +483,14 @@ mod test {
         let (env, client, admin) = setup();
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
+
         client.mint(&admin, &alice, &1_000_000);
-        let expiry = env.ledger().sequence() + 1_000;
+
+        // Use MIN_APPROVAL_VALIDITY_LEDGERS to satisfy the minimum window.
+        let expiry = env.ledger().sequence() + 17_280;
         client.approve(&alice, &bob, &300_000, &expiry);
         assert_eq!(client.allowance(&alice, &bob), 300_000);
+
         client.transfer_from(&bob, &alice, &bob, &100_000);
         assert_eq!(client.balance(&bob), 100_000);
         assert_eq!(client.allowance(&alice, &bob), 200_000);
@@ -357,8 +500,10 @@ mod test {
     fn test_burn() {
         let (env, client, admin) = setup();
         let user = Address::generate(&env);
+
         client.mint(&admin, &user, &500_000);
         client.burn(&user, &200_000);
+
         assert_eq!(client.balance(&user), 300_000);
         assert_eq!(client.total_supply(), 300_000);
     }
@@ -369,6 +514,7 @@ mod test {
         let (env, client, admin) = setup();
         let alice = Address::generate(&env);
         let bob = Address::generate(&env);
+
         client.mint(&admin, &alice, &100_000);
         client.transfer(&alice, &bob, &200_000);
     }
@@ -381,7 +527,7 @@ mod test {
         client.mint(&rando, &rando, &1_000_000);
     }
 
-    // ── Two-step admin transfer tests ──────────────────────────────────────────
+    // Two-step admin transfer tests
 
     #[test]
     fn test_transfer_admin_does_not_change_active_admin() {
@@ -446,7 +592,6 @@ mod test {
         client.transfer_admin(&admin, &new_admin);
         client.cancel_transfer(&admin);
 
-        // new_admin can no longer accept (no pending admin stored)
         // old admin still active
         let user = Address::generate(&env);
         client.mint(&admin, &user, &100);
@@ -462,5 +607,56 @@ mod test {
         client.cancel_transfer(&admin);
         // accept should now panic since PendingAdmin is cleared
         client.accept_admin(&new_admin);
+    }
+
+    #[test]
+    #[should_panic(expected = "expiration too soon")]
+    fn test_approve_expiry_too_soon_panics() {
+        let (env, client, admin) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        client.mint(&admin, &alice, &1_000_000);
+        // expiry is only 1 ledger ahead - below MIN_APPROVAL_VALIDITY_LEDGERS
+        let bad_expiry = env.ledger().sequence() + 1;
+        client.approve(&alice, &bob, &100_000, &bad_expiry);
+    }
+
+    #[test]
+    fn test_approve_minimum_valid_expiry() {
+        let (env, client, admin) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        client.mint(&admin, &alice, &1_000_000);
+        let min_expiry = env.ledger().sequence() + 17_280;
+        client.approve(&alice, &bob, &100_000, &min_expiry);
+        assert_eq!(client.allowance(&alice, &bob), 100_000);
+    }
+
+    #[test]
+    fn test_allowance_valid_at_expiry_ledger() {
+        let (env, client, admin) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        client.mint(&admin, &alice, &1_000_000);
+        let current = env.ledger().sequence();
+        let expiry = current + 17_280;
+        client.approve(&alice, &bob, &100_000, &expiry);
+        // Advance to the exact expiration ledger - allowance must still be valid (inclusive).
+        env.ledger().with_mut(|li| li.sequence_number = expiry);
+        assert_eq!(client.allowance(&alice, &bob), 100_000);
+    }
+
+    #[test]
+    fn test_allowance_zero_after_expiry_ledger() {
+        let (env, client, admin) = setup();
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+        client.mint(&admin, &alice, &1_000_000);
+        let current = env.ledger().sequence();
+        let expiry = current + 17_280;
+        client.approve(&alice, &bob, &100_000, &expiry);
+        // Advance one ledger past expiry - allowance must return 0.
+        env.ledger().with_mut(|li| li.sequence_number = expiry + 1);
+        assert_eq!(client.allowance(&alice, &bob), 0);
     }
 }
