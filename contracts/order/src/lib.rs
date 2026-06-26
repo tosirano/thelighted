@@ -52,6 +52,8 @@ pub struct OrderItem {
     pub name: String,
     pub quantity: u32,
     pub unit_price: i128,
+    /// Full snapshot: name + authoritative price at order time.
+    pub snapshot: MenuItemSnapshot,
 }
 
 #[contracttype]
@@ -131,6 +133,7 @@ impl OrderContract {
 
         // Compute total from items using checked arithmetic to prevent overflow.
         let mut total: i128 = 0;
+
         for item in items.iter() {
             if item.quantity == 0 {
                 panic!("quantity must be greater than zero");
@@ -161,7 +164,7 @@ impl OrderContract {
             id,
             restaurant_id,
             customer: customer.clone(),
-            items: items.clone(),
+            items: validated_items,
             total_amount: total,
             status: OrderStatus::Pending,
             created_at: now,
@@ -170,7 +173,6 @@ impl OrderContract {
             expires_at: now + ORDER_TTL_SECONDS,
         };
 
-        let ttl: u32 = 2_073_600;
         env.storage().persistent().set(&DataKey::Order(id), &order);
         env.storage()
             .persistent()
@@ -430,12 +432,20 @@ mod test {
         }
     }
 
-    fn make_item(env: &Env, id: u64, qty: u32, price: i128) -> OrderItem {
+    /// Build a minimal OrderItem. `unit_price` is intentionally wrong to prove
+    /// place_order ignores it and uses the registry price instead.
+    fn make_item(env: &Env, id: u64, qty: u32) -> OrderItem {
+        let snap = MenuItemSnapshot {
+            menu_item_id: id,
+            name: String::from_str(env, ""),
+            price_at_order: 0,
+        };
         OrderItem {
             menu_item_id: id,
-            name: String::from_str(env, "Jollof Rice"),
+            name: String::from_str(env, ""),
             quantity: qty,
-            unit_price: price,
+            unit_price: 1, // deliberately wrong — should be ignored
+            snapshot: snap,
         }
     }
 
