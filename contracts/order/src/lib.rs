@@ -20,6 +20,16 @@ const MAX_ITEM_UNIT_PRICE: i128 = 1_000_000_000_000; // 100,000 XLM
 const MAX_ORDER_TOTAL: i128 = 100_000_000_000_000; // 10,000,000 XLM
 
 // ---------------------------------------------------------------------------
+// Cross-contract: Loyalty Token client
+// ---------------------------------------------------------------------------
+
+/// Minimal interface needed to mint BITE tokens from the Order contract.
+#[contractclient(name = "LoyaltyTokenClient")]
+pub trait LoyaltyTokenInterface {
+    fn mint(env: Env, caller: Address, to: Address, amount: i128);
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -91,6 +101,9 @@ impl OrderContract {
             .instance()
             .set(&DataKey::RestaurantRegistry, &restaurant_registry_address);
         env.storage().instance().set(&DataKey::Count, &0u64);
+        if let Some(addr) = loyalty_token_address {
+            env.storage().instance().set(&DataKey::LoyaltyToken, &addr);
+        }
         env.storage().instance().extend_ttl(17_280, 17_280);
     }
 
@@ -228,6 +241,31 @@ impl OrderContract {
             OrderStatus::Cancelled => panic!("cannot advance a cancelled order"),
         };
         order.updated_at = env.ledger().timestamp();
+
+        // Auto-mint loyalty tokens on delivery (exactly once).
+        if order.status == OrderStatus::Delivered && !order.minted {
+            let mint_amount = order.total_amount / 10_000;
+            if mint_amount > 0 {
+                if let Some(loyalty_addr) = env
+                    .storage()
+                    .instance()
+                    .get::<DataKey, Address>(&DataKey::LoyaltyToken)
+                {
+                    let loyalty_client = LoyaltyTokenClient::new(&env, &loyalty_addr);
+                    loyalty_client.mint(
+                        &env.current_contract_address(),
+                        &order.customer,
+                        &mint_amount,
+                    );
+                    env.events().publish(
+                        (symbol_short!("loyal"), symbol_short!("earn")),
+                        (order.customer.clone(), mint_amount),
+                    );
+                }
+            }
+            order.minted = true;
+        }
+
         Self::save_order(&env, &order);
 
         env.events().publish(
@@ -312,6 +350,7 @@ impl OrderContract {
 #[cfg(test)]
 mod test {
     use super::*;
+    use loyalty_token::LoyaltyToken;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{contract, contractimpl, vec, Env, String};
 
@@ -376,6 +415,33 @@ mod test {
         client.initialize(&admin, &registry_id);
         (env, client, admin, registry_id)
     }
+
+    /// Set up order + loyalty token contracts wired together.
+    fn setup_with_loyalty() -> (
+        Env,
+        OrderContractClient<'static>,
+        loyalty_token::LoyaltyTokenClient<'static>,
+        Address, // admin
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Deploy loyalty token contract.
+        let lt_cid = env.register(LoyaltyToken, ());
+        let lt_client = loyalty_token::LoyaltyTokenClient::new(&env, &lt_cid);
+        let admin = Address::generate(&env);
+        // Deploy order contract as minter so it can call mint.
+        let order_cid = env.register(OrderContract, ());
+        let order_client = OrderContractClient::new(&env, &order_cid);
+
+        // order contract address is the minter.
+        lt_client.initialize(&admin, &order_cid);
+        order_client.initialize(&admin, &Some(lt_cid));
+
+        (env, order_client, lt_client, admin)
+    }
+
+    // -------  existing tests (updated for new initialize signature) --------
 
     #[test]
     fn test_place_order_valid_active_restaurant() {
@@ -457,7 +523,7 @@ mod test {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         let customer = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&admin, &None);
 
         let items = vec![
             &env,
@@ -581,7 +647,7 @@ mod test {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         let customer = Address::generate(&env);
-        client.initialize(&admin);
+        client.initialize(&admin, &None);
 
         env.ledger().with_mut(|l| l.timestamp = 1_000);
         let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
@@ -589,5 +655,63 @@ mod test {
 
         let order = client.get_order(&id);
         assert_eq!(order.expires_at, 1_000 + super::ORDER_TTL_SECONDS);
+    }
+
+    // -------  new loyalty-mint tests  -------------------------------------
+
+    /// A 50 000-stroop order delivered → mints exactly 5 BITE.
+    #[test]
+    fn test_delivery_mints_loyalty_tokens() {
+        let (env, order_client, lt_client, admin) = setup_with_loyalty();
+        let customer = Address::generate(&env);
+
+        // 50 000 stroops → 5 BITE
+        let items = vec![&env, make_item(&env, 1, 1, 50_000)];
+        let id = order_client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+
+        // Advance through the full lifecycle to Delivered.
+        order_client.advance_status(&admin, &id); // Confirmed
+        order_client.advance_status(&admin, &id); // Preparing
+        order_client.advance_status(&admin, &id); // Ready
+        order_client.advance_status(&admin, &id); // Delivered
+
+        assert_eq!(lt_client.balance(&customer), 5);
+        assert!(order_client.get_order(&id).minted);
+    }
+
+    /// Calling advance_status on an already-delivered order panics (no re-mint).
+    #[test]
+    #[should_panic(expected = "order already delivered")]
+    fn test_no_double_mint_on_already_delivered() {
+        let (env, order_client, _lt_client, admin) = setup_with_loyalty();
+        let customer = Address::generate(&env);
+
+        let items = vec![&env, make_item(&env, 1, 1, 50_000)];
+        let id = order_client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+
+        for _ in 0..4 {
+            order_client.advance_status(&admin, &id);
+        }
+        // This call must panic.
+        order_client.advance_status(&admin, &id);
+    }
+
+    /// Orders with total_amount < 10 000 stroops mint 0 tokens and do not panic.
+    #[test]
+    fn test_small_order_mints_zero_tokens() {
+        let (env, order_client, lt_client, admin) = setup_with_loyalty();
+        let customer = Address::generate(&env);
+
+        // 9 999 stroops → 0 BITE (integer division)
+        let items = vec![&env, make_item(&env, 1, 1, 9_999)];
+        let id = order_client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+
+        for _ in 0..4 {
+            order_client.advance_status(&admin, &id);
+        }
+
+        assert_eq!(lt_client.balance(&customer), 0);
+        // minted flag is still set to prevent any future attempt.
+        assert!(order_client.get_order(&id).minted);
     }
 }
