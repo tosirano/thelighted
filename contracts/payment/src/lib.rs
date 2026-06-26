@@ -138,6 +138,7 @@ impl PaymentContract {
         amount: i128,
     ) {
         payer.require_auth();
+        Self::assert_not_paused_for(&env, &payer);
 
         if env.storage().persistent().has(&DataKey::Payment(order_id)) {
             panic!("payment already exists for this order");
@@ -195,6 +196,7 @@ impl PaymentContract {
     pub fn release_payment(env: Env, caller: Address, order_id: u64) {
         // ── CHECKS ────────────────────────────────────────────────────────
         caller.require_auth();
+        Self::assert_not_paused_for(&env, &caller);
 
         let mut payment: Payment = env
             .storage()
@@ -278,6 +280,7 @@ impl PaymentContract {
     pub fn refund_payment(env: Env, caller: Address, order_id: u64) {
         caller.require_auth();
         Self::assert_admin_or_panic(&env, &caller);
+        // Admin can always refund, even while paused – no pause guard here.
 
         let mut payment: Payment = env
             .storage()
@@ -365,10 +368,41 @@ impl PaymentContract {
             panic!("unauthorized: admin only");
         }
     }
-}
 
-// ---------------------------------------------------------------------------
-// Tests
+    fn assert_not_paused_for(env: &Env, caller: &Address) {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if caller != &admin {
+                panic!("contract is paused");
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pause / unpause
+    // -----------------------------------------------------------------------
+
+    /// Pause the contract (admin only).
+    pub fn pause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+    }
+
+    /// Unpause the contract (admin only).
+    pub fn unpause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+    }
+}
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
