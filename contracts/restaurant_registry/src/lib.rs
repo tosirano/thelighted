@@ -5,13 +5,13 @@
 //! used as a foreign key in the Order and Payment contracts.
 //!
 //! ## Roles
-//! - **Admin** – contract deployer; can deactivate any restaurant.
+//! - **Admin** – contract deployer; can suspend/unsuspend any restaurant.
 //! - **Owner** – the wallet that registered a restaurant; can update its
-//!   own restaurant metadata and toggle its active flag.
+//!   own restaurant metadata and permanently close it.
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol};
 
 // ---------------------------------------------------------------------------
 // Storage types
@@ -33,6 +33,10 @@ pub struct Restaurant {
     pub is_active: bool,
     /// Ledger timestamp of registration.
     pub created_at: u64,
+    /// Address that performed the last deactivation (None if currently active).
+    pub deactivated_by: Option<Address>,
+    /// Ledger timestamp of the last deactivation (None if currently active).
+    pub deactivated_at: Option<u64>,
 }
 
 /// Storage key discriminants.
@@ -46,6 +50,8 @@ pub enum DataKey {
     Restaurant(u64),
     /// Reverse lookup: owner address → restaurant ID.
     OwnerToId(Address),
+    /// Whether the contract is paused.
+    Paused,
 }
 
 // ---------------------------------------------------------------------------
@@ -71,7 +77,7 @@ impl RestaurantRegistry {
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Count, &0u64);
-        env.storage().instance().extend_ttl(17_280, 17_280); // ~1 day
+        env.storage().instance().extend_ttl(17_280, 17_280);
     }
 
     // -----------------------------------------------------------------------
@@ -87,6 +93,7 @@ impl RestaurantRegistry {
     /// - If the owner already has a registered restaurant.
     pub fn register_restaurant(env: Env, owner: Address, name: String, slug: String) -> u64 {
         owner.require_auth();
+        Self::assert_not_paused_for(&env, &owner);
 
         if env
             .storage()
@@ -106,9 +113,11 @@ impl RestaurantRegistry {
             slug: slug.clone(),
             is_active: true,
             created_at: env.ledger().timestamp(),
+            deactivated_by: None,
+            deactivated_at: None,
         };
 
-        let ttl: u32 = 2_073_600; // ~120 days on Stellar
+        let ttl: u32 = 2_073_600;
         env.storage()
             .persistent()
             .set(&DataKey::Restaurant(id), &restaurant);
@@ -126,7 +135,6 @@ impl RestaurantRegistry {
         env.storage().instance().set(&DataKey::Count, &id);
         env.storage().instance().extend_ttl(17_280, 17_280);
 
-        // Emit: (topic1, topic2) -> (id, owner)
         env.events().publish(
             (symbol_short!("register"), symbol_short!("rest")),
             (id, owner, name),
@@ -146,6 +154,7 @@ impl RestaurantRegistry {
         slug: String,
     ) {
         caller.require_auth();
+        Self::assert_not_paused_for(&env, &caller);
 
         let mut restaurant: Restaurant = env
             .storage()
@@ -175,11 +184,15 @@ impl RestaurantRegistry {
         );
     }
 
-    /// Activate or deactivate a restaurant.
+    /// Permanently close a restaurant. Only the restaurant's own owner may call this.
     ///
-    /// Only the owner or admin may change the active flag.
-    pub fn set_active(env: Env, caller: Address, restaurant_id: u64, active: bool) {
+    /// This action is irreversible — the admin cannot reopen a voluntarily closed restaurant.
+    ///
+    /// # Panics
+    /// - If `caller` is not the restaurant owner.
+    pub fn owner_close_restaurant(env: Env, caller: Address, restaurant_id: u64) {
         caller.require_auth();
+        Self::assert_not_paused_for(&env, &caller);
 
         let mut restaurant: Restaurant = env
             .storage()
@@ -187,12 +200,14 @@ impl RestaurantRegistry {
             .get(&DataKey::Restaurant(restaurant_id))
             .unwrap_or_else(|| panic!("restaurant not found"));
 
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        if caller != restaurant.owner && caller != admin {
-            panic!("unauthorized");
+        if caller != restaurant.owner {
+            panic!("unauthorized: only the restaurant owner can close their restaurant");
         }
 
-        restaurant.is_active = active;
+        let now = env.ledger().timestamp();
+        restaurant.is_active = false;
+        restaurant.deactivated_by = Some(caller.clone());
+        restaurant.deactivated_at = Some(now);
 
         let ttl: u32 = 2_073_600;
         env.storage()
@@ -203,8 +218,87 @@ impl RestaurantRegistry {
             .extend_ttl(&DataKey::Restaurant(restaurant_id), ttl, ttl);
 
         env.events().publish(
-            (symbol_short!("setactive"), symbol_short!("rest")),
-            (restaurant_id, active),
+            (symbol_short!("rest"), symbol_short!("close")),
+            (restaurant_id, caller, now),
+        );
+    }
+
+    /// Suspend a restaurant (recoverable). Only the contract admin may call this.
+    ///
+    /// # Panics
+    /// - If `caller` is not the contract admin.
+    pub fn admin_suspend_restaurant(
+        env: Env,
+        caller: Address,
+        restaurant_id: u64,
+        reason: Symbol,
+    ) {
+        caller.require_auth();
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("unauthorized: only the admin can suspend a restaurant");
+        }
+
+        let mut restaurant: Restaurant = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Restaurant(restaurant_id))
+            .unwrap_or_else(|| panic!("restaurant not found"));
+
+        let now = env.ledger().timestamp();
+        restaurant.is_active = false;
+        restaurant.deactivated_by = Some(caller.clone());
+        restaurant.deactivated_at = Some(now);
+
+        let ttl: u32 = 2_073_600;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Restaurant(restaurant_id), &restaurant);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Restaurant(restaurant_id), ttl, ttl);
+
+        env.events().publish(
+            (symbol_short!("rest"), symbol_short!("suspend")),
+            (restaurant_id, caller, now, reason),
+        );
+    }
+
+    /// Lift a suspension placed by the admin. Only the contract admin may call this.
+    ///
+    /// # Panics
+    /// - If `caller` is not the contract admin.
+    pub fn admin_unsuspend_restaurant(env: Env, caller: Address, restaurant_id: u64) {
+        caller.require_auth();
+
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != admin {
+            panic!("unauthorized: only the admin can unsuspend a restaurant");
+        }
+
+        let mut restaurant: Restaurant = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Restaurant(restaurant_id))
+            .unwrap_or_else(|| panic!("restaurant not found"));
+
+        let now = env.ledger().timestamp();
+        restaurant.is_active = true;
+        restaurant.deactivated_by = None;
+        restaurant.deactivated_at = None;
+
+        let ttl: u32 = 2_073_600;
+        env.storage()
+            .persistent()
+            .set(&DataKey::Restaurant(restaurant_id), &restaurant);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Restaurant(restaurant_id), ttl, ttl);
+
+        env.events().publish(
+            (symbol_short!("rest"), symbol_short!("unsuspnd")),
+            (restaurant_id, caller, now),
         );
     }
 
@@ -237,6 +331,47 @@ impl RestaurantRegistry {
     pub fn admin(env: Env) -> Address {
         env.storage().instance().get(&DataKey::Admin).unwrap()
     }
+
+    // -----------------------------------------------------------------------
+    // Pause / unpause
+    // -----------------------------------------------------------------------
+
+    /// Pause the contract (admin only).
+    pub fn pause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+    }
+
+    /// Unpause the contract (admin only).
+    pub fn unpause_contract(env: Env, caller: Address) {
+        caller.require_auth();
+        Self::assert_admin_or_panic(&env, &caller);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().extend_ttl(17_280, 17_280);
+        env.events()
+            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+    }
+
+    fn assert_admin_or_panic(env: &Env, caller: &Address) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        if caller != &admin {
+            panic!("unauthorized: admin only");
+        }
+    }
+
+    fn assert_not_paused_for(env: &Env, caller: &Address) {
+        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        if paused {
+            let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+            if caller != &admin {
+                panic!("contract is paused");
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +390,17 @@ mod test {
         let contract_id = env.register(RestaurantRegistry, ());
         let client = RestaurantRegistryClient::new(&env, &contract_id);
         (env, client)
+    }
+
+    fn register_one(env: &Env, client: &RestaurantRegistryClient, admin: &Address) -> (Address, u64) {
+        let owner = Address::generate(env);
+        client.initialize(admin);
+        let id = client.register_restaurant(
+            &owner,
+            &String::from_str(env, "Mama's Kitchen"),
+            &String::from_str(env, "mamas-kitchen"),
+        );
+        (owner, id)
     }
 
     #[test]
@@ -276,6 +422,8 @@ mod test {
         assert_eq!(rest.owner, owner);
         assert_eq!(rest.name, String::from_str(&env, "Mama's Kitchen"));
         assert!(rest.is_active);
+        assert!(rest.deactivated_by.is_none());
+        assert!(rest.deactivated_at.is_none());
     }
 
     #[test]
@@ -302,23 +450,76 @@ mod test {
         assert_eq!(rest.name, String::from_str(&env, "New Name"));
     }
 
+    // -----------------------------------------------------------------------
+    // owner_close_restaurant
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_deactivate_restaurant() {
+    fn test_owner_can_close_own_restaurant() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
-        let owner = Address::generate(&env);
+        let (owner, id) = register_one(&env, &client, &admin);
 
-        client.initialize(&admin);
-        let id = client.register_restaurant(
-            &owner,
-            &String::from_str(&env, "Test Rest"),
-            &String::from_str(&env, "test-rest"),
-        );
+        client.owner_close_restaurant(&owner, &id);
 
-        client.set_active(&admin, &id, &false);
         let rest = client.get_restaurant(&id);
         assert!(!rest.is_active);
+        assert_eq!(rest.deactivated_by, Some(owner));
+        assert!(rest.deactivated_at.is_some());
     }
+
+    #[test]
+    #[should_panic(expected = "unauthorized: only the restaurant owner can close their restaurant")]
+    fn test_admin_cannot_call_owner_close() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let (_owner, id) = register_one(&env, &client, &admin);
+
+        // Admin tries to use the owner-only function — must panic
+        client.owner_close_restaurant(&admin, &id);
+    }
+
+    // -----------------------------------------------------------------------
+    // admin_suspend_restaurant / admin_unsuspend_restaurant
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_admin_can_suspend_and_unsuspend() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let (_owner, id) = register_one(&env, &client, &admin);
+
+        let reason = Symbol::new(&env, "policy");
+        client.admin_suspend_restaurant(&admin, &id, &reason);
+
+        let rest = client.get_restaurant(&id);
+        assert!(!rest.is_active);
+        assert_eq!(rest.deactivated_by, Some(admin.clone()));
+        assert!(rest.deactivated_at.is_some());
+
+        client.admin_unsuspend_restaurant(&admin, &id);
+
+        let rest = client.get_restaurant(&id);
+        assert!(rest.is_active);
+        assert!(rest.deactivated_by.is_none());
+        assert!(rest.deactivated_at.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "unauthorized: only the admin can suspend a restaurant")]
+    fn test_owner_cannot_call_admin_suspend() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let (owner, id) = register_one(&env, &client, &admin);
+
+        let reason = Symbol::new(&env, "policy");
+        // Owner tries to use the admin-only suspend function — must panic
+        client.admin_suspend_restaurant(&owner, &id, &reason);
+    }
+
+    // -----------------------------------------------------------------------
+    // Legacy / other
+    // -----------------------------------------------------------------------
 
     #[test]
     #[should_panic(expected = "already initialized")]
@@ -346,5 +547,51 @@ mod test {
             &String::from_str(&env, "Second"),
             &String::from_str(&env, "second"),
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "contract is paused")]
+    fn test_pause_blocks_register() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause_contract(&admin);
+        client.register_restaurant(
+            &owner,
+            &String::from_str(&env, "Blocked"),
+            &String::from_str(&env, "blocked"),
+        );
+    }
+
+    #[test]
+    fn test_pause_admin_can_still_register() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause_contract(&admin);
+        // Admin can still register while paused.
+        let id = client.register_restaurant(
+            &admin,
+            &String::from_str(&env, "Admin Rest"),
+            &String::from_str(&env, "admin-rest"),
+        );
+        assert_eq!(id, 1);
+    }
+
+    #[test]
+    fn test_unpause_restores_register() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let owner = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause_contract(&admin);
+        client.unpause_contract(&admin);
+        let id = client.register_restaurant(
+            &owner,
+            &String::from_str(&env, "Back Open"),
+            &String::from_str(&env, "back-open"),
+        );
+        assert!(id > 0);
     }
 }
