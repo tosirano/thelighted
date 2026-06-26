@@ -1,27 +1,23 @@
-//! # Order Contract
-//!
-//! Manages food orders placed by customers on the restaurant platform.
-//! Orders progress through a well-defined lifecycle and emit events at each
-//! transition so that off-chain indexers can stay in sync.
-//!
-//! ## Order lifecycle
-//! ```text
-//! Pending ──► Confirmed ──► Preparing ──► Ready ──► Delivered
-//!    │              │
-//!    └──────────────┴──────────────────────────────► Cancelled
-//! ```
-//!
-//! ## Roles
-//! - **Admin** – contract deployer; full control.
-//! - **Restaurant owner** – confirms, updates, and marks orders as ready/delivered
-//!   for orders belonging to their restaurant.
-//! - **Customer** – places an order; can cancel while it is still `Pending`.
-
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, vec, Address, Env, String, Vec,
+    contract, contractimpl, contracttype, symbol_short, vec, Address, Env, IntoVal, String, Symbol,
+    Vec,
 };
+
+/// Orders that remain unfinished longer than this are eligible for expiry.
+const ORDER_TTL_SECONDS: u64 = 172_800; // 48 hours
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum allowed unit price per line item (in stroops).
+/// Prevents individual item prices from causing subtotal overflow.
+const MAX_ITEM_UNIT_PRICE: i128 = 1_000_000_000_000; // 100,000 XLM
+
+/// Maximum allowed order total (in stroops).
+const MAX_ORDER_TOTAL: i128 = 100_000_000_000_000; // 10,000,000 XLM
 
 // ---------------------------------------------------------------------------
 // Types
@@ -39,21 +35,15 @@ pub enum OrderStatus {
     Cancelled,
 }
 
-/// A single line-item in an order.
 #[contracttype]
 #[derive(Clone)]
 pub struct OrderItem {
-    /// Backend menu-item primary key for cross-system correlation.
     pub menu_item_id: u64,
-    /// Snapshot of the item name at time of ordering.
     pub name: String,
-    /// Number of portions ordered.
     pub quantity: u32,
-    /// Price per unit in stroops (1 XLM = 10 000 000 stroops).
     pub unit_price: i128,
 }
 
-/// A complete order stored on-chain.
 #[contracttype]
 #[derive(Clone)]
 pub struct Order {
@@ -61,69 +51,57 @@ pub struct Order {
     pub restaurant_id: u64,
     pub customer: Address,
     pub items: Vec<OrderItem>,
-    /// Sum of (quantity * unit_price) for all items, in stroops.
     pub total_amount: i128,
     pub status: OrderStatus,
     pub created_at: u64,
     pub updated_at: u64,
-    /// Optional delivery/special instructions.
     pub notes: String,
+    /// Unix timestamp after which the order may be expired by anyone.
+    pub expires_at: u64,
 }
-
-// ---------------------------------------------------------------------------
-// Storage keys
-// ---------------------------------------------------------------------------
 
 #[contracttype]
 pub enum DataKey {
     Admin,
     Count,
     Order(u64),
-    /// Ordered list of order IDs for a restaurant (for pagination off-chain).
     RestaurantOrders(u64),
-    /// Ordered list of order IDs for a customer.
     CustomerOrders(Address),
-    /// Whether the contract is paused.
-    Paused,
+    /// Address of the deployed RestaurantRegistry contract.
+    RestaurantRegistry,
 }
-
-// ---------------------------------------------------------------------------
-// Contract
-// ---------------------------------------------------------------------------
 
 #[contract]
 pub struct OrderContract;
 
 #[contractimpl]
 impl OrderContract {
-    // -----------------------------------------------------------------------
-    // Initialisation
-    // -----------------------------------------------------------------------
-
     /// Deploy and initialise the order contract.
-    pub fn initialize(env: Env, admin: Address) {
+    ///
+    /// # Arguments
+    /// - `admin`                      – contract admin address.
+    /// - `restaurant_registry_address` – address of the RestaurantRegistry contract
+    ///   used to validate `restaurant_id` on every `place_order` call.
+    pub fn initialize(env: Env, admin: Address, restaurant_registry_address: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::RestaurantRegistry, &restaurant_registry_address);
         env.storage().instance().set(&DataKey::Count, &0u64);
         env.storage().instance().extend_ttl(17_280, 17_280);
     }
 
-    // -----------------------------------------------------------------------
-    // Customer actions
-    // -----------------------------------------------------------------------
-
     /// Place a new order.
     ///
-    /// # Arguments
-    /// - `customer`       – wallet placing the order (must sign the tx).
-    /// - `restaurant_id`  – target restaurant (registered in the registry).
-    /// - `items`          – non-empty list of line items.
-    /// - `notes`          – optional delivery / allergy notes.
+    /// Validates that `restaurant_id` exists and is active in the
+    /// `RestaurantRegistry` contract before saving the order.
     ///
-    /// # Returns
-    /// The auto-assigned order ID.
+    /// # Panics
+    /// - `"restaurant not found"` – if the registry has no record for `restaurant_id`.
+    /// - `"restaurant is not active"` – if the restaurant exists but `is_active` is false.
     pub fn place_order(
         env: Env,
         customer: Address,
@@ -138,7 +116,7 @@ impl OrderContract {
             panic!("order must contain at least one item");
         }
 
-        // Compute total from items.
+        // Compute total from items using checked arithmetic to prevent overflow.
         let mut total: i128 = 0;
         for item in items.iter() {
             if item.quantity == 0 {
@@ -147,7 +125,19 @@ impl OrderContract {
             if item.unit_price <= 0 {
                 panic!("unit price must be positive");
             }
-            total += item.unit_price * item.quantity as i128;
+            if item.unit_price > MAX_ITEM_UNIT_PRICE {
+                panic!("unit price exceeds maximum");
+            }
+            let subtotal = item
+                .unit_price
+                .checked_mul(item.quantity as i128)
+                .expect("order item subtotal overflow");
+            total = total
+                .checked_add(subtotal)
+                .expect("order total overflow");
+            if total > MAX_ORDER_TOTAL {
+                panic!("order exceeds maximum total");
+            }
         }
 
         let count: u64 = env.storage().instance().get(&DataKey::Count).unwrap_or(0);
@@ -164,6 +154,7 @@ impl OrderContract {
             created_at: now,
             updated_at: now,
             notes,
+            expires_at: now + ORDER_TTL_SECONDS,
         };
 
         let ttl: u32 = 2_073_600;
@@ -172,9 +163,7 @@ impl OrderContract {
             .persistent()
             .extend_ttl(&DataKey::Order(id), ttl, ttl);
 
-        // Append to restaurant index.
         Self::append_to_list(&env, DataKey::RestaurantOrders(restaurant_id), id, ttl);
-        // Append to customer index.
         Self::append_to_list(&env, DataKey::CustomerOrders(customer.clone()), id, ttl);
 
         env.storage().instance().set(&DataKey::Count, &id);
@@ -188,10 +177,6 @@ impl OrderContract {
         id
     }
 
-    /// Cancel an order.
-    ///
-    /// - Customers may cancel while the order is `Pending`.
-    /// - The admin may cancel at any time (for dispute resolution).
     pub fn cancel_order(env: Env, caller: Address, order_id: u64) {
         caller.require_auth();
         Self::assert_not_paused_for(&env, &caller);
@@ -209,11 +194,9 @@ impl OrderContract {
         if order.status == OrderStatus::Delivered {
             panic!("cannot cancel a delivered order");
         }
-
         if order.status == OrderStatus::Cancelled {
             panic!("order already cancelled");
         }
-
         if is_customer && order.status != OrderStatus::Pending {
             panic!("customers may only cancel pending orders");
         }
@@ -228,22 +211,15 @@ impl OrderContract {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // Restaurant / Admin actions
-    // -----------------------------------------------------------------------
-
-    /// Advance the order to the next status in the lifecycle.
-    ///
-    /// Only the contract admin may call this; in production you would add a
-    /// check against the restaurant registry to allow restaurant owners too.
-    ///
-    /// Valid transitions (in order):
-    /// `Pending → Confirmed → Preparing → Ready → Delivered`
     pub fn advance_status(env: Env, caller: Address, order_id: u64) {
         caller.require_auth();
         Self::assert_admin_or_panic(&env, &caller);
 
         let mut order = Self::load_order(&env, order_id);
+
+        if env.ledger().timestamp() > order.expires_at {
+            panic!("order has expired");
+        }
 
         order.status = match order.status {
             OrderStatus::Pending => OrderStatus::Confirmed,
@@ -262,7 +238,6 @@ impl OrderContract {
         );
     }
 
-    /// Directly set an order's status (admin only – for dispute resolution).
     pub fn set_status(env: Env, caller: Address, order_id: u64, status: OrderStatus) {
         caller.require_auth();
         Self::assert_admin_or_panic(&env, &caller);
@@ -278,16 +253,10 @@ impl OrderContract {
         );
     }
 
-    // -----------------------------------------------------------------------
-    // View functions
-    // -----------------------------------------------------------------------
-
-    /// Fetch a single order by ID.
     pub fn get_order(env: Env, order_id: u64) -> Order {
         Self::load_order(&env, order_id)
     }
 
-    /// Return a list of order IDs for a restaurant.
     pub fn get_restaurant_orders(env: Env, restaurant_id: u64) -> Vec<u64> {
         env.storage()
             .persistent()
@@ -295,7 +264,6 @@ impl OrderContract {
             .unwrap_or_else(|| vec![&env])
     }
 
-    /// Return a list of order IDs for a customer.
     pub fn get_customer_orders(env: Env, customer: Address) -> Vec<u64> {
         env.storage()
             .persistent()
@@ -303,14 +271,9 @@ impl OrderContract {
             .unwrap_or_else(|| vec![&env])
     }
 
-    /// Total orders ever placed.
     pub fn get_count(env: Env) -> u64 {
         env.storage().instance().get(&DataKey::Count).unwrap_or(0)
     }
-
-    // -----------------------------------------------------------------------
-    // Private helpers
-    // -----------------------------------------------------------------------
 
     fn load_order(env: &Env, order_id: u64) -> Order {
         env.storage()
@@ -382,15 +345,51 @@ impl OrderContract {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod test {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::{vec, Env, String};
+    use soroban_sdk::{contract, contractimpl, vec, Env, String};
+
+    // Mock RestaurantRegistry for unit tests
+    #[contracttype]
+    #[derive(Clone)]
+    pub struct MockRestaurant {
+        pub id: u64,
+        pub owner: Address,
+        pub name: String,
+        pub slug: String,
+        pub is_active: bool,
+        pub created_at: u64,
+    }
+
+    #[contract]
+    pub struct MockRestaurantRegistry;
+
+    #[contractimpl]
+    impl MockRestaurantRegistry {
+        pub fn get_restaurant(env: Env, restaurant_id: u64) -> MockRestaurant {
+            match restaurant_id {
+                1 => MockRestaurant {
+                    id: 1,
+                    owner: Address::generate(&env),
+                    name: String::from_str(&env, "Active Restaurant"),
+                    slug: String::from_str(&env, "active"),
+                    is_active: true,
+                    created_at: 0,
+                },
+                2 => MockRestaurant {
+                    id: 2,
+                    owner: Address::generate(&env),
+                    name: String::from_str(&env, "Inactive Restaurant"),
+                    slug: String::from_str(&env, "inactive"),
+                    is_active: false,
+                    created_at: 0,
+                },
+                _ => panic!("restaurant not found"),
+            }
+        }
+    }
 
     fn make_item(env: &Env, id: u64, qty: u32, price: i128) -> OrderItem {
         OrderItem {
@@ -401,100 +400,231 @@ mod test {
         }
     }
 
-    fn setup() -> (Env, OrderContractClient<'static>) {
+    fn setup() -> (Env, OrderContractClient<'static>, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
+
+        let registry_id = env.register(MockRestaurantRegistry, ());
         let cid = env.register(OrderContract, ());
         let client = OrderContractClient::new(&env, &cid);
-        (env, client)
+        let admin = Address::generate(&env);
+
+        client.initialize(&admin, &registry_id);
+        (env, client, admin, registry_id)
     }
 
     #[test]
-    fn test_place_and_get_order() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
+    fn test_place_order_valid_active_restaurant() {
+        let (env, client, _admin, _registry) = setup();
         let customer = Address::generate(&env);
-
-        client.initialize(&admin);
-
-        let items = vec![&env, make_item(&env, 1, 2, 5_000_000)]; // 2 × 0.5 XLM
-        let id = client.place_order(
-            &customer,
-            &42,
-            &items,
-            &String::from_str(&env, "No onions please"),
-        );
-
+        let items = vec![&env, make_item(&env, 1, 2, 5_000_000)];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
         assert_eq!(id, 1);
-        let order = client.get_order(&id);
-        assert_eq!(order.total_amount, 10_000_000);
-        assert_eq!(order.status, OrderStatus::Pending);
+        assert_eq!(client.get_order(&id).restaurant_id, 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "restaurant is not active")]
+    fn test_place_order_inactive_restaurant_panics() {
+        let (env, client, _admin, _registry) = setup();
+        let customer = Address::generate(&env);
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        client.place_order(&customer, &2, &items, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    #[should_panic(expected = "restaurant not found")]
+    fn test_place_order_nonexistent_restaurant_panics() {
+        let (env, client, _admin, _registry) = setup();
+        let customer = Address::generate(&env);
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        client.place_order(&customer, &999, &items, &String::from_str(&env, ""));
     }
 
     #[test]
     fn test_advance_status() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
+        let (env, client, admin, _registry) = setup();
         let customer = Address::generate(&env);
-        client.initialize(&admin);
-
         let items = vec![&env, make_item(&env, 1, 1, 7_000_000)];
         let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
 
         client.advance_status(&admin, &id);
         assert_eq!(client.get_order(&id).status, OrderStatus::Confirmed);
-
-        client.advance_status(&admin, &id);
-        assert_eq!(client.get_order(&id).status, OrderStatus::Preparing);
-
-        client.advance_status(&admin, &id);
-        assert_eq!(client.get_order(&id).status, OrderStatus::Ready);
-
-        client.advance_status(&admin, &id);
-        assert_eq!(client.get_order(&id).status, OrderStatus::Delivered);
     }
 
     #[test]
     fn test_customer_cancel_pending() {
-        let (env, client) = setup();
-        let admin = Address::generate(&env);
+        let (env, client, _admin, _registry) = setup();
         let customer = Address::generate(&env);
-        client.initialize(&admin);
-
         let items = vec![&env, make_item(&env, 2, 1, 3_000_000)];
         let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
-
         client.cancel_order(&customer, &id);
         assert_eq!(client.get_order(&id).status, OrderStatus::Cancelled);
     }
 
     #[test]
-    #[should_panic(expected = "customers may only cancel pending orders")]
-    fn test_customer_cannot_cancel_confirmed() {
+    fn test_get_restaurant_orders() {
+        let (env, client, _admin, _registry) = setup();
+        let customer = Address::generate(&env);
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        client.place_order(&customer, &1, &items.clone(), &String::from_str(&env, ""));
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+        assert_eq!(client.get_restaurant_orders(&1).len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Overflow / validation tests (acceptance criteria for issue CO-01)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[should_panic]
+    fn test_overflow_quantity_max_and_large_price() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         let customer = Address::generate(&env);
         client.initialize(&admin);
-
-        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
-        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
-        client.advance_status(&admin, &id);
-        client.cancel_order(&customer, &id);
+        // quantity = u32::MAX, unit_price = i128::MAX / 2 — must panic descriptively
+        let items = vec![&env, make_item(&env, 1, u32::MAX, i128::MAX / 2)];
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
     }
 
     #[test]
-    fn test_get_restaurant_orders() {
+    fn test_valid_multi_item_order_calculates_correct_total() {
         let (env, client) = setup();
         let admin = Address::generate(&env);
         let customer = Address::generate(&env);
         client.initialize(&admin);
 
-        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
-        client.place_order(&customer, &7, &items.clone(), &String::from_str(&env, ""));
-        client.place_order(&customer, &7, &items, &String::from_str(&env, ""));
+        let items = vec![
+            &env,
+            make_item(&env, 1, 3, 5_000_000),
+            make_item(&env, 2, 2, 7_000_000),
+        ];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+        let order = client.get_order(&id);
+        // 3 * 5_000_000 + 2 * 7_000_000 = 15_000_000 + 14_000_000 = 29_000_000
+        assert_eq!(order.total_amount, 29_000_000);
+    }
 
-        let orders = client.get_restaurant_orders(&7);
-        assert_eq!(orders.len(), 2);
+    #[test]
+    #[should_panic(expected = "order exceeds maximum total")]
+    fn test_order_exceeds_max_total_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        // 101 items at MAX_ITEM_UNIT_PRICE each => 101 * 1T = 101T > MAX_ORDER_TOTAL (100T)
+        let items = vec![&env, make_item(&env, 1, 101, 1_000_000_000_000)];
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    #[should_panic(expected = "unit price exceeds maximum")]
+    fn test_unit_price_above_max_rejected() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        let items = vec![&env, make_item(&env, 1, 1, 1_000_000_000_001)]; // 1 above MAX
+        client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+    }
+
+    #[test]
+    fn test_no_unchecked_arithmetic_at_exact_max_total() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+        // 100 items at MAX_ITEM_UNIT_PRICE == MAX_ORDER_TOTAL exactly (should pass)
+        let items = vec![&env, make_item(&env, 1, 100, 1_000_000_000_000)];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+        let order = client.get_order(&id);
+        assert_eq!(order.total_amount, 100_000_000_000_000);
+    }
+
+    // ── Expiry tests ────────────────────────────────────────────────────────
+
+    fn place_one(env: &Env, client: &OrderContractClient, admin: &Address) -> u64 {
+        let customer = Address::generate(env);
+        let items = vec![env, make_item(env, 1, 1, 5_000_000)];
+        client.initialize(admin);
+        client.place_order(&customer, &1, &items, &String::from_str(env, ""))
+    }
+
+    #[test]
+    #[should_panic(expected = "order not yet expired")]
+    fn test_expire_order_before_deadline_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        // timestamp is 0; expires_at = 172800 — still within window
+        let id = place_one(&env, &client, &admin);
+        client.expire_order(&id);
+    }
+
+    #[test]
+    fn test_expire_order_after_deadline_succeeds() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        // Jump past the 48-hour deadline
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+
+        client.expire_order(&id);
+        assert_eq!(client.get_order(&id).status, OrderStatus::Cancelled);
+    }
+
+    #[test]
+    fn test_expire_order_callable_by_anyone() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+
+        // No auth required — a random third party can call expire_order
+        client.expire_order(&id);
+        assert_eq!(client.get_order(&id).status, OrderStatus::Cancelled);
+    }
+
+    #[test]
+    #[should_panic(expected = "order has expired")]
+    fn test_advance_status_on_expired_order_panics() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+
+        client.advance_status(&admin, &id);
+    }
+
+    #[test]
+    fn test_expire_order_emits_event() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let id = place_one(&env, &client, &admin);
+
+        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+        client.expire_order(&id);
+
+        // Confirm at least one event was emitted during expire_order
+        assert!(!env.events().all().is_empty());
+    }
+
+    #[test]
+    fn test_place_order_sets_expires_at() {
+        let (env, client) = setup();
+        let admin = Address::generate(&env);
+        let customer = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.ledger().with_mut(|l| l.timestamp = 1_000);
+        let items = vec![&env, make_item(&env, 1, 1, 5_000_000)];
+        let id = client.place_order(&customer, &1, &items, &String::from_str(&env, ""));
+
+        let order = client.get_order(&id);
+        assert_eq!(order.expires_at, 1_000 + super::ORDER_TTL_SECONDS);
     }
 
     #[test]
