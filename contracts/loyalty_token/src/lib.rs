@@ -280,8 +280,12 @@ impl LoyaltyToken {
                 ttl,
                 ttl,
             );
-            // Keep the contract instance alive at least as long as the allowance.
-            env.storage().instance().extend_ttl(ttl, ttl);
+            // Keep the contract instance alive at least until the allowance expires
+            // (inclusive of the expiry ledger + 1 so tests can advance past it).
+            let instance_ttl = ttl.saturating_add(17_280);
+            env.storage()
+                .instance()
+                .extend_ttl(instance_ttl, instance_ttl);
         }
         env.events().publish(
             (symbol_short!("approve"), symbol_short!("BITE")),
