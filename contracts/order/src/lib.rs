@@ -30,6 +30,30 @@ pub trait LoyaltyTokenInterface {
 }
 
 // ---------------------------------------------------------------------------
+// Cross-contract: Restaurant Registry client
+// ---------------------------------------------------------------------------
+
+/// Minimal restaurant record returned by the registry.
+/// Must match the field layout of `Restaurant` in the registry contract.
+#[contracttype]
+#[derive(Clone)]
+pub struct RestaurantInfo {
+    pub id: u64,
+    pub owner: Address,
+    pub name: String,
+    pub slug: String,
+    pub is_active: bool,
+    pub created_at: u64,
+    pub deactivated_by: Option<Address>,
+    pub deactivated_at: Option<u64>,
+}
+
+#[contractclient(name = "RestaurantRegistryClient")]
+pub trait RestaurantRegistryInterface {
+    fn get_restaurant(env: Env, restaurant_id: u64) -> RestaurantInfo;
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -137,6 +161,18 @@ impl OrderContract {
     ) -> u64 {
         customer.require_auth();
         Self::assert_not_paused_for(&env, &customer);
+
+        // Validate restaurant exists and is active via the registry.
+        let registry_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RestaurantRegistry)
+            .expect("registry not set");
+        let registry = RestaurantRegistryClient::new(&env, &registry_addr);
+        let restaurant = registry.get_restaurant(&restaurant_id); // panics "restaurant not found" if missing
+        if !restaurant.is_active {
+            panic!("restaurant is not active");
+        }
 
         if items.is_empty() {
             panic!("order must contain at least one item");
@@ -446,6 +482,8 @@ mod test {
         pub slug: String,
         pub is_active: bool,
         pub created_at: u64,
+        pub deactivated_by: Option<Address>,
+        pub deactivated_at: Option<u64>,
     }
 
     #[contract]
@@ -462,6 +500,8 @@ mod test {
                     slug: String::from_str(&env, "active"),
                     is_active: true,
                     created_at: 0,
+                    deactivated_by: None,
+                    deactivated_at: None,
                 },
                 2 => MockRestaurant {
                     id: 2,
@@ -470,6 +510,8 @@ mod test {
                     slug: String::from_str(&env, "inactive"),
                     is_active: false,
                     created_at: 0,
+                    deactivated_by: None,
+                    deactivated_at: None,
                 },
                 _ => panic!("restaurant not found"),
             }
