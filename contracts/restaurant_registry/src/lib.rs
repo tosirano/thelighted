@@ -11,7 +11,9 @@
 
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, Env, String, Symbol,
+};
 
 // ---------------------------------------------------------------------------
 // Storage types
@@ -227,12 +229,7 @@ impl RestaurantRegistry {
     ///
     /// # Panics
     /// - If `caller` is not the contract admin.
-    pub fn admin_suspend_restaurant(
-        env: Env,
-        caller: Address,
-        restaurant_id: u64,
-        reason: Symbol,
-    ) {
+    pub fn admin_suspend_restaurant(env: Env, caller: Address, restaurant_id: u64, reason: Symbol) {
         caller.require_auth();
 
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
@@ -342,8 +339,10 @@ impl RestaurantRegistry {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("pause")),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Unpause the contract (admin only).
@@ -352,8 +351,10 @@ impl RestaurantRegistry {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("unpause")),
+            env.ledger().timestamp(),
+        );
     }
 
     fn assert_admin_or_panic(env: &Env, caller: &Address) {
@@ -364,7 +365,11 @@ impl RestaurantRegistry {
     }
 
     fn assert_not_paused_for(env: &Env, caller: &Address) {
-        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
         if paused {
             let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
             if caller != &admin {
@@ -392,7 +397,11 @@ mod test {
         (env, client)
     }
 
-    fn register_one(env: &Env, client: &RestaurantRegistryClient, admin: &Address) -> (Address, u64) {
+    fn register_one(
+        env: &Env,
+        client: &RestaurantRegistryClient,
+        admin: &Address,
+    ) -> (Address, u64) {
         let owner = Address::generate(env);
         client.initialize(admin);
         let id = client.register_restaurant(

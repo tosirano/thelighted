@@ -216,11 +216,7 @@ impl PaymentContract {
         // Reentrancy guard: reject any re-entry for this order during
         // execution (e.g. a malicious token calling back into release_payment
         // inside its transfer() implementation).
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::Releasing(order_id))
-        {
+        if env.storage().instance().has(&DataKey::Releasing(order_id)) {
             panic!("reentrant call");
         }
         env.storage()
@@ -370,7 +366,11 @@ impl PaymentContract {
     }
 
     fn assert_not_paused_for(env: &Env, caller: &Address) {
-        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
         if paused {
             let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
             if caller != &admin {
@@ -389,8 +389,10 @@ impl PaymentContract {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("pause")),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Unpause the contract (admin only).
@@ -399,8 +401,10 @@ impl PaymentContract {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("unpause")),
+            env.ledger().timestamp(),
+        );
     }
 }
 // ---------------------------------------------------------------------------

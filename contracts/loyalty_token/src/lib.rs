@@ -144,8 +144,10 @@ impl LoyaltyToken {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("pause")),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Unpause the contract (admin only).
@@ -154,8 +156,10 @@ impl LoyaltyToken {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("unpause")),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Update the authorised minter address (admin only).
@@ -173,7 +177,9 @@ impl LoyaltyToken {
     pub fn transfer_admin(env: Env, caller: Address, new_admin: Address) {
         caller.require_auth();
         Self::assert_admin_or_panic(&env, &caller);
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
         env.storage().instance().extend_ttl(17_280, 17_280);
         env.events().publish(
             (symbol_short!("admin"), symbol_short!("proposed")),
@@ -198,10 +204,8 @@ impl LoyaltyToken {
         env.storage().instance().set(&DataKey::Admin, &caller);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events().publish(
-            (symbol_short!("admin"), symbol_short!("accepted")),
-            caller,
-        );
+        env.events()
+            .publish((symbol_short!("admin"), symbol_short!("accepted")), caller);
     }
 
     /// Cancel a pending admin transfer. Only the current admin may call this.
@@ -455,7 +459,11 @@ impl LoyaltyToken {
     }
 
     fn assert_not_paused_for(env: &Env, caller: &Address) {
-        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
         if paused {
             let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
             if caller != &admin {

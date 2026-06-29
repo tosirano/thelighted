@@ -148,9 +148,7 @@ impl OrderContract {
                 .unit_price
                 .checked_mul(item.quantity as i128)
                 .expect("order item subtotal overflow");
-            total = total
-                .checked_add(subtotal)
-                .expect("order total overflow");
+            total = total.checked_add(subtotal).expect("order total overflow");
             if total > MAX_ORDER_TOTAL {
                 panic!("order exceeds maximum total");
             }
@@ -340,7 +338,11 @@ impl OrderContract {
     }
 
     fn assert_not_paused_for(env: &Env, caller: &Address) {
-        let paused: bool = env.storage().instance().get(&DataKey::Paused).unwrap_or(false);
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false);
         if paused {
             let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
             if caller != &admin {
@@ -359,8 +361,10 @@ impl OrderContract {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("pause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("pause")),
+            env.ledger().timestamp(),
+        );
     }
 
     /// Unpause the contract (admin only).
@@ -369,8 +373,10 @@ impl OrderContract {
         Self::assert_admin_or_panic(&env, &caller);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.storage().instance().extend_ttl(17_280, 17_280);
-        env.events()
-            .publish((symbol_short!("ctrl"), symbol_short!("unpause")), env.ledger().timestamp());
+        env.events().publish(
+            (symbol_short!("ctrl"), symbol_short!("unpause")),
+            env.ledger().timestamp(),
+        );
     }
 
     fn append_to_list(env: &Env, key: DataKey, id: u64, ttl: u32) {
@@ -644,7 +650,8 @@ mod test {
         let id = place_one(&env, &client, &admin);
 
         // Jump past the 48-hour deadline
-        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+        env.ledger()
+            .with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
 
         client.expire_order(&id);
         assert_eq!(client.get_order(&id).status, OrderStatus::Cancelled);
@@ -656,7 +663,8 @@ mod test {
         let admin = Address::generate(&env);
         let id = place_one(&env, &client, &admin);
 
-        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+        env.ledger()
+            .with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
 
         // No auth required — a random third party can call expire_order
         client.expire_order(&id);
@@ -670,7 +678,8 @@ mod test {
         let admin = Address::generate(&env);
         let id = place_one(&env, &client, &admin);
 
-        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+        env.ledger()
+            .with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
 
         client.advance_status(&admin, &id);
     }
@@ -681,7 +690,8 @@ mod test {
         let admin = Address::generate(&env);
         let id = place_one(&env, &client, &admin);
 
-        env.ledger().with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
+        env.ledger()
+            .with_mut(|l| l.timestamp = super::ORDER_TTL_SECONDS + 1);
         client.expire_order(&id);
 
         // Confirm at least one event was emitted during expire_order
