@@ -610,14 +610,22 @@ mod test {
     }
 
     #[test]
-    #[should_panic(expected = "unauthorized: admin only")]
+    #[should_panic(expected = "unauthorized: admin or minter only")]
     fn test_old_admin_cannot_mint_after_accept() {
-        let (env, client, admin) = setup();
+        let env = Env::default();
+        env.mock_all_auths();
+        let cid = env.register(LoyaltyToken, ());
+        let client = LoyaltyTokenClient::new(&env, &cid);
+        let admin = Address::generate(&env);
+        // Use a distinct minter so old admin has no minter privilege either.
+        let minter = Address::generate(&env);
+        client.initialize(&admin, &minter);
+
         let new_admin = Address::generate(&env);
         client.transfer_admin(&admin, &new_admin);
         client.accept_admin(&new_admin);
 
-        // old admin should fail
+        // old admin is no longer admin or minter — must panic
         let user = Address::generate(&env);
         client.mint(&admin, &user, &100);
     }
@@ -693,7 +701,10 @@ mod test {
         let expiry = current + 17_280;
         client.approve(&alice, &bob, &100_000, &expiry);
         // Advance to the exact expiration ledger - allowance must still be valid (inclusive).
-        env.ledger().with_mut(|li| li.sequence_number = expiry);
+        env.ledger().with_mut(|li| {
+            li.sequence_number = expiry;
+            li.min_persistent_entry_ttl = expiry + 10_000;
+        });
         assert_eq!(client.allowance(&alice, &bob), 100_000);
     }
 
@@ -706,8 +717,12 @@ mod test {
         let current = env.ledger().sequence();
         let expiry = current + 17_280;
         client.approve(&alice, &bob, &100_000, &expiry);
-        // Advance one ledger past expiry - allowance must return 0.
-        env.ledger().with_mut(|li| li.sequence_number = expiry + 1);
+        // Advance one ledger past expiry and extend the instance TTL so the
+        // contract isn't considered archived when allowance() is called.
+        env.ledger().with_mut(|li| {
+            li.sequence_number = expiry + 1;
+            li.min_persistent_entry_ttl = expiry + 10_000;
+        });
         assert_eq!(client.allowance(&alice, &bob), 0);
     }
 }
