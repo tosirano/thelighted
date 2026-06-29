@@ -280,6 +280,8 @@ impl LoyaltyToken {
                 ttl,
                 ttl,
             );
+            // Keep the contract instance alive at least as long as the allowance.
+            env.storage().instance().extend_ttl(ttl, ttl);
         }
         env.events().publish(
             (symbol_short!("approve"), symbol_short!("BITE")),
@@ -701,10 +703,7 @@ mod test {
         let expiry = current + 17_280;
         client.approve(&alice, &bob, &100_000, &expiry);
         // Advance to the exact expiration ledger - allowance must still be valid (inclusive).
-        env.ledger().with_mut(|li| {
-            li.sequence_number = expiry;
-            li.min_persistent_entry_ttl = expiry + 10_000;
-        });
+        env.ledger().with_mut(|li| li.sequence_number = expiry);
         assert_eq!(client.allowance(&alice, &bob), 100_000);
     }
 
@@ -717,12 +716,8 @@ mod test {
         let current = env.ledger().sequence();
         let expiry = current + 17_280;
         client.approve(&alice, &bob, &100_000, &expiry);
-        // Advance one ledger past expiry and extend the instance TTL so the
-        // contract isn't considered archived when allowance() is called.
-        env.ledger().with_mut(|li| {
-            li.sequence_number = expiry + 1;
-            li.min_persistent_entry_ttl = expiry + 10_000;
-        });
+        // Advance one ledger past expiry - allowance must return 0.
+        env.ledger().with_mut(|li| li.sequence_number = expiry + 1);
         assert_eq!(client.allowance(&alice, &bob), 0);
     }
 }
