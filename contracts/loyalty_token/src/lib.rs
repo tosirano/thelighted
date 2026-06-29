@@ -485,7 +485,7 @@ impl LoyaltyToken {
 #[cfg(test)]
 mod test {
     use super::*;
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Ledger as _};
     use soroban_sdk::Env;
 
     fn setup() -> (Env, LoyaltyTokenClient<'static>, Address) {

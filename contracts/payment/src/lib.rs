@@ -79,6 +79,8 @@ pub enum DataKey {
     /// this order ID.  Prevents a malicious token from re-entering and
     /// draining escrow twice.
     Releasing(u64),
+    /// Circuit-breaker flag: when true, non-admin callers are blocked.
+    Paused,
 }
 
 // ---------------------------------------------------------------------------
