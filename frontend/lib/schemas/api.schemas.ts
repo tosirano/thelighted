@@ -85,7 +85,7 @@ export const AnalyticsSchema = z.object({
 export const ApiErrorSchema = z.object({
   statusCode: z.number().int(),
   message: z.string(),
-  details: z.record(z.array(z.string())).optional(),
+  details: z.record(z.string(), z.array(z.string())).optional(),
 });
 
 // ── Inferred types (single source of truth) ────────────────────────────────
