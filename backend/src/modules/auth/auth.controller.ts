@@ -1,4 +1,3 @@
-// backend/src/modules/auth/auth.controller.ts
 import {
   Controller,
   Post,
@@ -10,6 +9,7 @@ import {
   HttpStatus,
   Patch,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
 import { LoginDto, RegisterAdminDto, ChangePasswordDto } from './auth.dto';
 import { JwtAuthGuard } from './jwt-auth.guard';
@@ -20,12 +20,14 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(HttpStatus.OK)
   async login(@Body() loginDto: LoginDto) {
     return await this.authService.login(loginDto);
   }
 
   @Post('register')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @HttpCode(HttpStatus.CREATED)
   async register(@Body() registerAdminDto: RegisterAdminDto) {
     return await this.authService.register(registerAdminDto);
@@ -56,7 +58,6 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   async logout() {
-    // In the app, you might want to blacklist the token
     return { message: 'Logged out successfully' };
   }
 
