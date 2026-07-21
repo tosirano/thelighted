@@ -1,4 +1,3 @@
-// backend/src/modules/auth/auth.service.ts
 import {
   Injectable,
   UnauthorizedException,
@@ -8,11 +7,13 @@ import {
 import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
+import { v4 as uuidv4 } from 'uuid';
 import { AdminUser, AdminRole } from './admin-user.entity';
 import { LoginDto, RegisterAdminDto, ChangePasswordDto } from './auth.dto';
 import { UpdateRegisterAdminDto } from './update-auth.dto';
 import { ErrorCatch } from 'src/errorCatch.util';
 import { Restaurant } from '../restaurant/restaurant.entity';
+import { TokenBlacklistService } from './token-blacklist.service';
 
 @Injectable()
 export class AuthService {
@@ -22,7 +23,61 @@ export class AuthService {
     private readonly jwtService: JwtService,
     @InjectRepository(Restaurant)
     private readonly restaurantRepository: Repository<Restaurant>,
+    private readonly tokenBlacklistService: TokenBlacklistService,
   ) {}
+
+  private parseExpiresIn(expiresIn: string): number {
+    const match = expiresIn.match(/^(\d+)([smhd])$/);
+    if (!match) return 86400;
+    const value = parseInt(match[1], 10);
+    const unit = match[2];
+    switch (unit) {
+      case 's':
+        return value;
+      case 'm':
+        return value * 60;
+      case 'h':
+        return value * 3600;
+      case 'd':
+        return value * 86400;
+      default:
+        return 86400;
+    }
+  }
+
+  private generateTokenPair(admin: AdminUser) {
+    const jti = uuidv4();
+    const refreshJti = uuidv4();
+
+    const accessToken = this.jwtService.sign({
+      sub: admin.id,
+      username: admin.username,
+      role: admin.role,
+      restaurantId: admin.restaurantId,
+      jti,
+    });
+
+    const refreshTokenSecret =
+      process.env.REFRESH_TOKEN_SECRET || 'refresh-secret';
+    const refreshTokenExpiresIn = process.env.REFRESH_TOKEN_EXPIRES_IN || '7d';
+    const refreshTtl = this.parseExpiresIn(refreshTokenExpiresIn);
+
+    const refreshToken = this.jwtService.sign(
+      {
+        sub: admin.id,
+        type: 'refresh',
+        jti: refreshJti,
+      },
+      {
+        secret: refreshTokenSecret,
+        expiresIn: refreshTtl,
+      },
+    );
+
+    this.tokenBlacklistService.blacklistRefreshToken(refreshJti, refreshTtl);
+
+    return { accessToken, refreshToken, accessJti: jti, refreshJti, refreshTtl };
+  }
 
   async login(loginDto: LoginDto) {
     const admin = await this.adminUserRepository.findOne({
@@ -38,24 +93,18 @@ export class AuthService {
       throw new UnauthorizedException('Account is deactivated');
     }
 
-    // Check if restaurant is active
     if (!admin.restaurant.isActive) {
       throw new UnauthorizedException('Restaurant account is deactivated');
     }
 
-    // Update last login
     admin.lastLoginAt = new Date();
     await this.adminUserRepository.save(admin);
 
-    const payload = {
-      sub: admin.id,
-      username: admin.username,
-      role: admin.role,
-      restaurantId: admin.restaurantId,
-    };
+    const { accessToken, refreshToken } = this.generateTokenPair(admin);
 
     return {
-      accessToken: this.jwtService.sign(payload),
+      accessToken,
+      refreshToken,
       user: {
         id: admin.id,
         username: admin.username,
@@ -72,7 +121,6 @@ export class AuthService {
   }
 
   async register(registerAdminDto: RegisterAdminDto) {
-    // Check if username already exists
     const existingUsername = await this.adminUserRepository.findOne({
       where: { username: registerAdminDto.username },
     });
@@ -81,7 +129,6 @@ export class AuthService {
       throw new ConflictException('Username already exists');
     }
 
-    // Check if email already exists
     const existingEmail = await this.adminUserRepository.findOne({
       where: { email: registerAdminDto.email },
     });
@@ -90,13 +137,11 @@ export class AuthService {
       throw new ConflictException('Email already exists');
     }
 
-    // Create slug from restaurant name
     const slug = registerAdminDto.restaurantName
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '');
 
-    // Check if restaurant slug already exists
     const existingRestaurant = await this.restaurantRepository.findOne({
       where: { slug },
     });
@@ -107,7 +152,6 @@ export class AuthService {
       );
     }
 
-    // Create restaurant first
     const restaurant = this.restaurantRepository.create({
       name: registerAdminDto.restaurantName,
       slug,
@@ -118,26 +162,21 @@ export class AuthService {
 
     await this.restaurantRepository.save(restaurant);
 
-    // Create admin user with SUPER_ADMIN role and link to restaurant
     const admin = this.adminUserRepository.create({
       username: registerAdminDto.username,
       email: registerAdminDto.email,
-      passwordHash: registerAdminDto.password, // Will be hashed by @BeforeInsert
+      passwordHash: registerAdminDto.password,
       role: AdminRole.SUPER_ADMIN,
       restaurantId: restaurant.id,
     });
 
     await this.adminUserRepository.save(admin);
 
-    const payload = {
-      sub: admin.id,
-      username: admin.username,
-      role: admin.role,
-      restaurantId: restaurant.id,
-    };
+    const { accessToken, refreshToken } = this.generateTokenPair(admin);
 
     return {
-      accessToken: this.jwtService.sign(payload),
+      accessToken,
+      refreshToken,
       user: {
         id: admin.id,
         username: admin.username,
@@ -151,6 +190,73 @@ export class AuthService {
         restaurantSlug: restaurant.slug,
       },
     };
+  }
+
+  async refreshTokens(refreshToken: string) {
+    const refreshTokenSecret =
+      process.env.REFRESH_TOKEN_SECRET || 'refresh-secret';
+
+    let payload: any;
+    try {
+      payload = this.jwtService.verify(refreshToken, {
+        secret: refreshTokenSecret,
+      });
+    } catch {
+      throw new UnauthorizedException('Invalid or expired refresh token');
+    }
+
+    if (payload.type !== 'refresh') {
+      throw new UnauthorizedException('Invalid token type');
+    }
+
+    const isValid =
+      await this.tokenBlacklistService.isRefreshTokenValid(payload.jti);
+    if (!isValid) {
+      throw new UnauthorizedException('Refresh token has been revoked');
+    }
+
+    await this.tokenBlacklistService.revokeRefreshToken(payload.jti);
+
+    const admin = await this.adminUserRepository.findOne({
+      where: { id: payload.sub },
+      relations: ['restaurant'],
+    });
+
+    if (!admin || !admin.isActive) {
+      throw new UnauthorizedException('Account is deactivated');
+    }
+
+    if (!admin.restaurant.isActive) {
+      throw new UnauthorizedException('Restaurant account is deactivated');
+    }
+
+    const tokens = this.generateTokenPair(admin);
+
+    return {
+      accessToken: tokens.accessToken,
+      refreshToken: tokens.refreshToken,
+    };
+  }
+
+  async logout(user: any, accessToken?: string) {
+    if (accessToken) {
+      try {
+        const decoded = this.jwtService.decode(accessToken);
+        if (decoded && decoded.jti) {
+          const expiresIn = decoded.exp
+            ? decoded.exp - Math.floor(Date.now() / 1000)
+            : 86400;
+          if (expiresIn > 0) {
+            await this.tokenBlacklistService.blacklistToken(
+              decoded.jti,
+              expiresIn,
+            );
+          }
+        }
+      } catch {}
+    }
+
+    return { message: 'Logged out successfully' };
   }
 
   async changePassword(
@@ -173,7 +279,7 @@ export class AuthService {
       throw new UnauthorizedException('Current password is incorrect');
     }
 
-    admin.passwordHash = changePasswordDto.newPassword; // Will be hashed by @BeforeUpdate
+    admin.passwordHash = changePasswordDto.newPassword;
     await this.adminUserRepository.save(admin);
 
     return { message: 'Password changed successfully' };
@@ -188,31 +294,12 @@ export class AuthService {
     });
   }
 
-  // async createDefaultAdmin() {
-  //   const existingAdmin = await this.adminUserRepository.findOne({
-  //     where: { username: process.env.ADMIN_DEFAULT_USERNAME || 'admin' },
-  //   });
-
-  //   if (!existingAdmin) {
-  //     const admin = this.adminUserRepository.create({
-  //       username: process.env.ADMIN_DEFAULT_USERNAME || 'admin',
-  //       email: process.env.ADMIN_DEFAULT_EMAIL || 'admin@restaurant.com',
-  //       passwordHash: process.env.ADMIN_DEFAULT_PASSWORD || 'changeme123',
-  //       role: AdminRole.ADMIN,
-  //     });
-
-  //     await this.adminUserRepository.save(admin);
-  //     console.log('Default admin user created');
-  //   }
-  // }
-
   async updateUserProfile(
     id: string,
     updateUserDto: UpdateRegisterAdminDto,
     restaurantId: string,
   ) {
     try {
-      // check if user exists
       const existingUser = await this.adminUserRepository.findOne({
         where: { id, restaurantId },
       });
@@ -221,7 +308,6 @@ export class AuthService {
         throw new NotFoundException('User not found');
       }
 
-      // Use preload to properly merge the updates with the existing entity
       const userToUpdate = await this.adminUserRepository.preload({
         id: id,
         ...updateUserDto,
@@ -231,10 +317,8 @@ export class AuthService {
         throw new NotFoundException('User not found');
       }
 
-      // save the updated user
       const updatedUser = await this.adminUserRepository.save(userToUpdate);
 
-      // Explicitly fetch the updated user with relations to ensure we get the correct data
       const finalUser = await this.adminUserRepository.findOne({
         where: { id: updatedUser.id },
       });

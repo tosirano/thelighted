@@ -1,4 +1,3 @@
-// backend/src/modules/auth/auth.module.ts
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { JwtModule } from '@nestjs/jwt';
@@ -9,6 +8,7 @@ import { AdminUser } from './admin-user.entity';
 import { JwtStrategy } from './jwt.strategy';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { Restaurant } from '../restaurant/restaurant.entity';
+import { TokenBlacklistService } from './token-blacklist.service';
 
 @Module({
   imports: [
@@ -26,7 +26,7 @@ import { Restaurant } from '../restaurant/restaurant.entity';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
+  providers: [AuthService, JwtStrategy, TokenBlacklistService],
   exports: [AuthService],
 })
 export class AuthModule {}
