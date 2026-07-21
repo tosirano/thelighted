@@ -1,16 +1,17 @@
-// backend/src/modules/auth/jwt.strategy.ts
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { AdminUser } from './admin-user.entity';
+import { TokenBlacklistService } from './token-blacklist.service';
 
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor(
     @InjectRepository(AdminUser)
     private readonly adminUserRepository: Repository<AdminUser>,
+    private readonly tokenBlacklistService: TokenBlacklistService,
   ) {
     super({
       jwtFromRequest: ExtractJwt.fromAuthHeaderAsBearerToken(),
@@ -20,6 +21,14 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: any) {
+    if (payload.jti) {
+      const isBlacklisted =
+        await this.tokenBlacklistService.isBlacklisted(payload.jti);
+      if (isBlacklisted) {
+        throw new UnauthorizedException('Token has been revoked');
+      }
+    }
+
     const admin = await this.adminUserRepository.findOne({
       where: { id: payload.sub },
       relations: ['restaurant'],
