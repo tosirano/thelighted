@@ -9,6 +9,7 @@ import {
   Patch,
   Res,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto, RegisterAdminDto, ChangePasswordDto } from './auth.dto';
@@ -20,6 +21,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Public()
   @HttpCode(HttpStatus.OK)
   async login(
@@ -43,6 +45,7 @@ export class AuthController {
   }
 
   @Post('register')
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Public()
   @HttpCode(HttpStatus.CREATED)
   async register(
