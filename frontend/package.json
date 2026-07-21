@@ -19,8 +19,10 @@
     "@vercel/speed-insights": "^1.2.0",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",
+    "dompurify": "^3.2.6",
     "embla-carousel-react": "^8.6.0",
     "framer-motion": "^12.23.24",
+    "jose": "^5.9.6",
     "lucide-react": "^0.562.0",
     "next": "15.5.9",
     "next-seo": "^7.0.1",
@@ -42,6 +44,7 @@
   "devDependencies": {
     "@eslint/eslintrc": "^3",
     "@tailwindcss/postcss": "^4",
+    "@types/dompurify": "^3.0.5",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
