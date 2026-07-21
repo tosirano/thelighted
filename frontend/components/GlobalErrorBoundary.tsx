@@ -1,9 +1,9 @@
 "use client";
 
-import React, { Component, ErrorInfo, ReactNode } from "react";
+import React from "react";
 
 interface Props {
-  children: ReactNode;
+  children: React.ReactNode;
 }
 
 interface State {
@@ -11,7 +11,7 @@ interface State {
   error: Error | null;
 }
 
-export class GlobalErrorBoundary extends Component<Props, State> {
+export class GlobalErrorBoundary extends React.Component<Props, State> {
   constructor(props: Props) {
     super(props);
     this.state = { hasError: false, error: null };
@@ -21,36 +21,28 @@ export class GlobalErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
-  componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("[GlobalErrorBoundary] Uncaught error:", error, info);
+  componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    console.error("Unhandled error:", error, info);
   }
 
-  handleReset = () => {
-    this.setState({ hasError: false, error: null });
-  };
-
-  render() {
+  render(): React.ReactNode {
     if (this.state.hasError) {
       return (
-        <div className="flex min-h-screen flex-col items-center justify-center gap-4 p-8 text-center">
-          <h1 className="text-2xl font-semibold text-red-600">
-            Something went wrong
-          </h1>
-          <p className="max-w-md text-gray-600">
-            An unexpected error occurred. Please try again, or refresh the page
-            if the problem persists.
-          </p>
-          {this.state.error && (
-            <pre className="max-w-lg overflow-auto rounded bg-gray-100 p-4 text-left text-sm text-gray-800">
-              {this.state.error.message}
-            </pre>
-          )}
-          <button
-            onClick={this.handleReset}
-            className="rounded bg-blue-600 px-6 py-2 text-white hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
-          >
-            Try again
-          </button>
+        <div className="flex min-h-screen items-center justify-center p-6">
+          <div className="text-center">
+            <h2 className="text-xl font-semibold text-gray-900 mb-2">
+              Something went wrong
+            </h2>
+            <p className="text-sm text-gray-500 mb-4">
+              {this.state.error?.message ?? "An unexpected error occurred."}
+            </p>
+            <button
+              onClick={() => this.setState({ hasError: false, error: null })}
+              className="px-4 py-2 bg-blue-600 text-white rounded text-sm hover:bg-blue-700"
+            >
+              Try again
+            </button>
+          </div>
         </div>
       );
     }

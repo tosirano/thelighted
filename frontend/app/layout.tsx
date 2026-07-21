@@ -20,6 +20,18 @@ export const metadata: Metadata = {
   description: "The Lighted platform",
 };
 
+/**
+ * RootLayout
+ *
+ * Structure:
+ *  1. Static navigation shell (server-rendered, visible immediately)
+ *  2. GlobalErrorBoundary catches render-phase errors
+ *  3. QueryProvider hydrates client-side — does NOT block the static shell
+ *
+ * Heavy dashboard components (PopularItemsChart, RecentActivity) are
+ * lazy-loaded via dynamic() with <Suspense> inside their page components,
+ * so they never delay the initial shell render.
+ */
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -30,11 +42,31 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
+        {/*
+          Static navigation shell — rendered server-side.
+          Visible before any client JS hydrates.
+        */}
+        <nav
+          className="h-14 border-b bg-white flex items-center px-6 shrink-0"
+          aria-label="Main navigation"
+        >
+          <span className="font-semibold text-gray-900">The Lighted</span>
+        </nav>
+
+        {/*
+          GlobalErrorBoundary wraps the dynamic content only.
+          The nav above stays visible even if an error boundary triggers.
+        */}
         <GlobalErrorBoundary>
+          {/*
+            QueryProvider hydrates after the static shell is painted.
+            Children can use <Suspense> boundaries independently.
+          */}
           <QueryProvider>
-            {children}
+            <main className="flex-1">{children}</main>
           </QueryProvider>
         </GlobalErrorBoundary>
+
         <Toaster richColors position="top-right" />
       </body>
     </html>

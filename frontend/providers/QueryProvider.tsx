@@ -1,8 +1,8 @@
 "use client";
 
+import React, { useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
-import { ReactNode, useState } from "react";
 
 /**
  * Exponential backoff with jitter.
@@ -18,7 +18,11 @@ function makeQueryClient(): QueryClient {
   return new QueryClient({
     defaultOptions: {
       queries: {
-        staleTime: 60 * 1000,
+        staleTime: 5 * 60 * 1000,
+        gcTime: 30 * 60 * 1000,
+        refetchOnWindowFocus: true,
+        refetchOnReconnect: true,
+        refetchOnMount: true,
         retry: 2,
         retryDelay,
       },
@@ -30,7 +34,7 @@ let browserQueryClient: QueryClient | undefined;
 
 function getQueryClient(): QueryClient {
   if (typeof window === "undefined") {
-    // Server: always create a new client
+    // Server: always create a new client — avoids leaking cached data across requests
     return makeQueryClient();
   }
   // Browser: reuse the same client across re-renders
@@ -40,7 +44,7 @@ function getQueryClient(): QueryClient {
   return browserQueryClient;
 }
 
-export function QueryProvider({ children }: { children: ReactNode }) {
+export function QueryProvider({ children }: { children: React.ReactNode }) {
   const [queryClient] = useState(() => getQueryClient());
 
   return (
