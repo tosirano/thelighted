@@ -3,7 +3,6 @@ import {
   Post,
   Get,
   Body,
-  UseGuards,
   Request,
   HttpCode,
   HttpStatus,
@@ -13,14 +12,15 @@ import {
 import { Response } from 'express';
 import { AuthService } from './auth.service';
 import { LoginDto, RegisterAdminDto, ChangePasswordDto } from './auth.dto';
-import { JwtAuthGuard } from './jwt-auth.guard';
 import { UpdateRegisterAdminDto } from './update-auth.dto';
+import { Public } from '../../common/decorators/public.decorator';
 
 @Controller('auth')
 export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('login')
+  @Public()
   @HttpCode(HttpStatus.OK)
   async login(
     @Body() loginDto: LoginDto,
@@ -43,6 +43,7 @@ export class AuthController {
   }
 
   @Post('register')
+  @Public()
   @HttpCode(HttpStatus.CREATED)
   async register(
     @Body() registerAdminDto: RegisterAdminDto,
@@ -95,7 +96,6 @@ export class AuthController {
   }
 
   @Post('change-password')
-  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   async changePassword(
     @Request() req,
@@ -110,13 +110,11 @@ export class AuthController {
   }
 
   @Get('me')
-  @UseGuards(JwtAuthGuard)
   async getProfile(@Request() req) {
     return req.user;
   }
 
   @Post('logout')
-  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.OK)
   async logout(@Request() req, @Res({ passthrough: true }) res: Response) {
     const authHeader = req.headers.authorization;
@@ -128,7 +126,6 @@ export class AuthController {
   }
 
   @Patch('profile')
-  @UseGuards(JwtAuthGuard)
   async updateUser(@Request() req, @Body() data: UpdateRegisterAdminDto) {
     const restaurantId = req.user.restaurantId;
     return await this.authService.updateUserProfile(

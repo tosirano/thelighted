@@ -1,25 +1,24 @@
-// backend/src/modules/admin/admin.controller.ts
 import {
   Controller,
   Get,
   Put,
   Param,
   Body,
-  UseGuards,
   Query,
   Request,
   Post,
 } from '@nestjs/common';
 import { AdminService } from './admin.service';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CreateUserDto } from './create-user.dto';
+import { Roles } from '../../common/decorators/roles.decorator';
+import { AdminRole } from '../auth/admin-user.entity';
 
 @Controller('admin')
-@UseGuards(JwtAuthGuard)
 export class AdminController {
   constructor(private readonly adminService: AdminService) {}
 
   @Post('users')
+  @Roles(AdminRole.SUPER_ADMIN)
   async createUser(@Body() data: CreateUserDto, @Request() req) {
     const restaurantId = req.user.restaurantId;
     return await this.adminService.createUser(
@@ -36,6 +35,7 @@ export class AdminController {
   }
 
   @Get('audit-logs')
+  @Roles(AdminRole.ADMIN, AdminRole.SUPER_ADMIN)
   async getAuditLogs(@Query('limit') limit?: string, @Request() req?) {
     const limitNum = limit ? parseInt(limit, 10) : 50;
     const restaurantId = req.user.restaurantId;
@@ -49,6 +49,7 @@ export class AdminController {
   }
 
   @Put('users/:id/status')
+  @Roles(AdminRole.SUPER_ADMIN)
   async toggleAdminStatus(
     @Param('id') id: string,
     @Body('isActive') isActive: boolean,
@@ -65,6 +66,7 @@ export class AdminController {
   }
 
   @Put('users/:id/role')
+  @Roles(AdminRole.SUPER_ADMIN)
   async updateAdminRole(
     @Param('id') id: string,
     @Body('role') role: string,

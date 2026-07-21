@@ -24,6 +24,16 @@ const eslintConfig = [
     rules: {
       "@typescript-eslint/no-explicit-any": "off",
       "@typescript-eslint/no-unused-vars": "off",
+
+      /**
+       * Flag any new dangerouslySetInnerHTML usage for mandatory review.
+       * All user-generated content MUST be passed through sanitize() before
+       * using dangerouslySetInnerHTML. This rule ensures new usages are
+       * consciously reviewed rather than silently introduced.
+       *
+       * @see frontend/lib/utils/sanitize.ts
+       */
+      "react/no-danger": "error",
     },
   },
 ];
